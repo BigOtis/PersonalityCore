@@ -52,7 +52,7 @@ struct FLocalTalkerCharacterConfig
     int32 Seed = 0;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
-    FString Stop;
+    FString Stop; // Empty by default - let model generate naturally, we'll clean output post-processing
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
     bool bSpeak = true;

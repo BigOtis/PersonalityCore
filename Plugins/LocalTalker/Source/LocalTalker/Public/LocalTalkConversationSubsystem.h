@@ -2,20 +2,50 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
-
+#include "LocalTalkerTypes.h"
 #include "LocalTalkConversationSubsystem.generated.h"
 
 class ULocalCharacterComponent;
 
+USTRUCT(BlueprintType)
+struct FLocalTalkMessage
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadWrite, Category="LocalTalker")
+    FString SpeakerName;
+
+    UPROPERTY(BlueprintReadWrite, Category="LocalTalker")
+    FString Content;
+
+    UPROPERTY(BlueprintReadWrite, Category="LocalTalker")
+    bool bFromUser = false;
+};
+
 /**
- * Manages turn-taking and conversation flow between multiple LocalCharacterComponents.
- *
- * Goals:
- * - Never cut off audio unless explicitly interrupted by the player.
- * - Prevent overlapping speech within proximity.
- * - Keep NPC-to-NPC chatter realistic (not constant ping-pong).
- * - Always respond to player/user utterances.
- * - Optional idle chatter after long silence.
+ * Represents a group of agents talking near each other.
+ */
+USTRUCT(BlueprintType)
+struct FLocalConversationContext
+{
+    GENERATED_BODY()
+
+    UPROPERTY()
+    TArray<TWeakObjectPtr<ULocalCharacterComponent>> Participants;
+
+    UPROPERTY()
+    TArray<FLocalTalkMessage> History;
+
+    UPROPERTY()
+    FVector LastCenter = FVector::ZeroVector;
+
+    UPROPERTY()
+    float LastInteractionTime = 0.0f;
+};
+
+/**
+ * The "Director" of the conversation. 
+ * Manages proximity groups and dictates who speaks and when.
  */
 UCLASS()
 class LOCALTALKER_API ULocalTalkConversationSubsystem : public UTickableWorldSubsystem
@@ -24,90 +54,52 @@ class LOCALTALKER_API ULocalTalkConversationSubsystem : public UTickableWorldSub
 
 public:
     virtual void Initialize(FSubsystemCollectionBase& Collection) override;
-    virtual void Deinitialize() override;
     virtual void Tick(float DeltaTime) override;
     virtual TStatId GetStatId() const override;
 
+    // --- Registry ---
     void RegisterTalker(ULocalCharacterComponent* Talker);
     void UnregisterTalker(ULocalCharacterComponent* Talker);
 
-    // Called when a talker begins generating/speaking (LLM starts)
-    void NotifyStartedSpeaking(ULocalCharacterComponent* Speaker);
+    // --- Turn Management ---
+    /** Character wants to say something (e.g. triggered by player interaction). */
+    void RequestTurn(ULocalCharacterComponent* Talker, const FString& Prompt);
+    
+    /** Character finished speaking. */
+    void ReleaseTurn(ULocalCharacterComponent* Talker);
 
-    // Called for each sentence as it's generated (for live broadcasting)
-    void NotifySentenceSpoken(ULocalCharacterComponent* Speaker, const FString& Sentence, bool bFromUser);
+    /** Broadcast a sentence from a speaker to nearby agents. */
+    void BroadcastSentence(ULocalCharacterComponent* Speaker, const FString& Text, bool bFromUser);
 
-    // Called when LLM generation is complete (but audio may still be playing!)
-    void NotifyFinishedSpeaking(ULocalCharacterComponent* Speaker);
+    /** Gets the history for the context this agent belongs to. */
+    TArray<FLocalTalkMessage> GetContextHistory(ULocalCharacterComponent* Agent);
 
-    // Called when audio playback has actually finished - THIS triggers next turn
-    void NotifyAudioPlaybackFinished(ULocalCharacterComponent* Speaker);
+    /** Forces everyone near a location to stop talking. */
+    void InterruptProximity(const FVector& Location, float Radius);
 
-    // Called when interrupted mid-speech
-    void NotifyInterrupted(ULocalCharacterComponent* Speaker);
-
-    // Broadcast user input to nearby talkers
-    void BroadcastUserUtterance(const FVector& Location, float Radius, const FString& UserText, bool bInterrupt);
-
-    bool IsAnyoneSpeakingNear(const FVector& Location, float Radius) const;
-    bool IsSpeaking(ULocalCharacterComponent* Talker) const;
+    // --- Queries ---
+    TArray<ULocalCharacterComponent*> GetRegisteredTalkers() const;
 
 private:
-    enum class ETalkerState : uint8
+    UPROPERTY()
+    TSet<TWeakObjectPtr<ULocalCharacterComponent>> Registry;
+
+    UPROPERTY()
+    TArray<FLocalConversationContext> ActiveContexts;
+
+    struct FQueuedTurn
     {
-        Idle,
-        Generating,
-        PlayingAudio,
+        TWeakObjectPtr<ULocalCharacterComponent> Talker;
+        FString Prompt;
     };
+    TArray<FQueuedTurn> ManualQueue;
 
-    struct FTalkerState
-    {
-        ETalkerState State = ETalkerState::Idle;
-        double StateStartTime = 0.0;
-        double LastSpokeTime = 0.0; // when they last finished a full turn
-        int32 RecentTurnCount = 0;
-    };
-
-    struct FPendingUtterance
-    {
-        FString SpeakerName;
-        FString Text;
-        FVector Location = FVector::ZeroVector;
-        float Radius = 0.0f;
-        double TimeReceived = 0.0;
-        double ResponseDueTime = 0.0;
-        bool bFromUser = false;
-
-        bool bResponderSelected = false;
-        TWeakObjectPtr<ULocalCharacterComponent> SelectedResponder;
-    };
-
-    TSet<TWeakObjectPtr<ULocalCharacterComponent>> Talkers;
-    TMap<TWeakObjectPtr<ULocalCharacterComponent>, FTalkerState> TalkerStates;
-    TMap<TWeakObjectPtr<ULocalCharacterComponent>, FString> AggregatedBySpeaker;
-    TArray<FPendingUtterance> PendingUtterances;
-
-    // Global pacing / fairness knobs
-    float TurnCooldownSeconds = 1.25f;
-    float RecentTurnWindow = 8.0f;
-
-    // Activity tracking / idle chatter scheduling
-    double LastConversationActivitySeconds = 0.0;
-    double NextIdleChatterDueSeconds = 0.0;
-
-    void Compact();
-    void UpdateTalkerStates();
-    void ProcessPendingUtterances();
-    void SelectResponderForUtterance(FPendingUtterance& Utterance);
-    void DispatchResponse(ULocalCharacterComponent* Responder, const FPendingUtterance& Utterance);
-    float CalculateResponsePriority(ULocalCharacterComponent* Candidate, const FPendingUtterance& Utterance) const;
-    bool CanRespond(ULocalCharacterComponent* Talker) const;
-
-    void TryStartIdleChatter();
-    void RescheduleIdleChatter(double Now);
-
-    void SetTalkerState(ULocalCharacterComponent* Talker, ETalkerState NewState);
-    FTalkerState& GetOrCreateTalkerState(ULocalCharacterComponent* Talker);
-
-    void CancelSpeakingInternal(ULocalCharacterComponent* Speaker);
+    void UpdateContexts();
+    void ProcessTurns();
+    
+    FLocalConversationContext* FindOrCreateContext(ULocalCharacterComponent* Agent);
+    void AddMessageToContext(FLocalConversationContext& Context, const FString& Speaker, const FString& Text, bool bFromUser);
+    
+    // Logic to decide who should respond next in a context
+    void EvaluateNextSpeaker(FLocalConversationContext& Context, ULocalCharacterComponent* LastSpeaker);
 };

@@ -1,10 +1,34 @@
 #include "LocalTalkerInProcAsync.h"
 #include "LocalLlamaDyn.h"
 #include "LocalTalkerLlamaCache.h"
+#include "LocalTalkerLog.h"
 
 #include "Async/Async.h"
+#include "HAL/IConsoleManager.h"
 #include "HAL/PlatformMisc.h"
 #include "HAL/PlatformTime.h"
+
+static TAutoConsoleVariable<int32> CVarLocalTalkerTraceConversation_InProc(
+    TEXT("LocalTalker.TraceConversation"),
+    0,
+    TEXT("Enable high-signal conversation tracing logs for LocalTalker.\n")
+    TEXT("0 = off (default)\n")
+    TEXT("1 = on"),
+    ECVF_Default
+);
+
+static FString LocalTalkerOneLineTrunc(const FString& In, int32 MaxChars)
+{
+    FString S = In;
+    S.ReplaceInline(TEXT("\r"), TEXT(" "));
+    S.ReplaceInline(TEXT("\n"), TEXT(" "));
+    S.TrimStartAndEndInline();
+    if (MaxChars > 0 && S.Len() > MaxChars)
+    {
+        S = S.Left(MaxChars) + TEXT("…");
+    }
+    return S;
+}
 
 ULocalTalkerInProcGenerateAsync* ULocalTalkerInProcGenerateAsync::GenerateStreamingInProc(
     UObject* WorldContextObject,
@@ -53,21 +77,32 @@ static bool LocalTalkerAbortCb(void* Data)
 
 static FString BuildPrompt(const FLocalTalkerCharacterConfig& C, const FString& UserPrompt)
 {
-    FString P;
-
     const FString Directions = !C.Directions.IsEmpty() ? C.Directions : C.SystemPrompt;
     const FString Desc = !C.CharacterDescription.IsEmpty() ? C.CharacterDescription : C.Persona;
 
+    FString SystemBlock;
     if (!Directions.IsEmpty())
     {
-        P += TEXT("Directions:\n") + Directions + TEXT("\n\n");
+        SystemBlock += TEXT("DIRECTIVES:\n") + Directions + TEXT("\n");
     }
     if (!Desc.IsEmpty())
     {
-        P += TEXT("Character Description:\n") + Desc + TEXT("\n\n");
+        SystemBlock += TEXT("\nCHARACTER DESCRIPTION:\n") + Desc + TEXT("\n");
     }
+    SystemBlock +=
+        TEXT("\nOUTPUT CONTRACT:\n")
+        TEXT("- Output exactly ONE line of spoken dialogue only.\n")
+        TEXT("- No speaker labels, no names + colon, no \"User:\" / \"Assistant:\".\n")
+        TEXT("- No narration, no stage directions, no extra lines.\n")
+        TEXT("- Do not include newline characters.\n");
 
-    P += TEXT("User: ") + UserPrompt + TEXT("\nAssistant:");
+    FString P;
+    P += TEXT("<s>[INST] <<SYS>>\n");
+    P += SystemBlock;
+    P += TEXT("\n<</SYS>>\n\n");
+    P += UserPrompt;
+    if (!P.EndsWith(TEXT("\n"))) P += TEXT("\n");
+    P += TEXT("[/INST]");
     return P;
 }
 
@@ -116,8 +151,25 @@ void ULocalTalkerInProcGenerateAsync::Activate()
     const FLocalTalkerCharacterConfig C = Character;
     const FString Prompt = bPromptIsFull ? PromptText : BuildPrompt(C, UserPrompt);
 
-    Async(EAsyncExecution::ThreadPool, [this, P, C, Prompt]()
+    const double ActivateStart = FPlatformTime::Seconds();
+    if (CVarLocalTalkerTraceConversation_InProc.GetValueOnAnyThread() != 0)
     {
+        UE_LOG(
+            LogLocalTalker,
+            Log,
+            TEXT("[TalkTrace][LLM] Activate (in-proc) promptLen=%d promptIsFull=%d maxTokens=%d temp=%.2f stopLen=%d promptPreview='%s'"),
+            Prompt.Len(),
+            bPromptIsFull ? 1 : 0,
+            C.MaxTokens,
+            C.Temperature,
+            C.Stop.Len(),
+            *LocalTalkerOneLineTrunc(Prompt, 220)
+        );
+    }
+
+    Async(EAsyncExecution::ThreadPool, [this, P, C, Prompt, ActivateStart]()
+    {
+        const double Start = FPlatformTime::Seconds();
         if (P.LlamaLibPath.IsEmpty())
         {
             DispatchError(TEXT("LlamaLibPath is empty. Set Project Settings -> LocalTalker -> DefaultPaths.LlamaLibPath"));
@@ -325,6 +377,7 @@ void ULocalTalkerInProcGenerateAsync::Activate()
                 DispatchToken(this, Piece);
                 DispatchDelta(this, Piece);
 
+                // Check stop sequence only if configured (empty by default now)
                 if (!C.Stop.IsEmpty() && FullOut.Contains(C.Stop))
                 {
                     const int32 Cut = FullOut.Find(C.Stop);
@@ -353,10 +406,27 @@ void ULocalTalkerInProcGenerateAsync::Activate()
 
         if (bCancel)
         {
+            if (CVarLocalTalkerTraceConversation_InProc.GetValueOnAnyThread() != 0)
+            {
+                const double End = FPlatformTime::Seconds();
+                UE_LOG(LogLocalTalker, Log, TEXT("[TalkTrace][LLM] Completed (cancelled) outLen=%d duration=%.3fs"), FullOut.Len(), (End - Start));
+            }
             DispatchCompleted(this, FullOut);
             return;
         }
 
+        if (CVarLocalTalkerTraceConversation_InProc.GetValueOnAnyThread() != 0)
+        {
+            const double End = FPlatformTime::Seconds();
+            UE_LOG(
+                LogLocalTalker,
+                Log,
+                TEXT("[TalkTrace][LLM] Completed outLen=%d duration=%.3fs activateToStart=%.3fs"),
+                FullOut.Len(),
+                (End - Start),
+                (Start - ActivateStart)
+            );
+        }
         DispatchCompleted(this, FullOut);
     });
 }

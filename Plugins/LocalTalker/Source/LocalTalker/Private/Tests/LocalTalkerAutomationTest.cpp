@@ -626,17 +626,14 @@ bool FLocalTalkerPacingBackpressureTest::RunTest(const FString& Parameters)
     C->RegisterComponent();
 
     // Make sentence extraction very easy
-    C->bSpeakStreaming = true;
     C->MinCharsBeforeSpeak = 1;
-    C->MaxSentenceChars = 200;
-    C->FlushSeconds = 0.0f;
 
     // Case 1: Not backpressured -> should enqueue a sentence (increments pending sentence count)
     C->Test_SetPendingCounts(0, 0);
     C->MaxQueuedSentencesAhead = 2;
     C->MaxQueuedAudioChunksAhead = 3;
     C->Test_SetLLMTextBuffer(TEXT("Hello there."));
-    C->TickComponent(0.016f, LEVELTICK_All, nullptr);
+    C->Test_TickComponent(0.016f);
 
     TestTrue(TEXT("PendingSentenceCount increased when not backpressured"), C->Test_GetPendingSentenceCount() > 0);
 
@@ -653,7 +650,7 @@ bool FLocalTalkerPacingBackpressureTest::RunTest(const FString& Parameters)
     C->Test_SetLLMTextBuffer(Big);
 
     const int32 BeforePending = C->Test_GetPendingSentenceCount();
-    C->TickComponent(0.016f, LEVELTICK_All, nullptr);
+    C->Test_TickComponent(0.016f);
 
     TestEqual(TEXT("PendingSentenceCount unchanged while backpressured"), C->Test_GetPendingSentenceCount(), BeforePending);
     TestTrue(TEXT("LLM buffer capped while backpressured"), C->Test_GetLLMTextBufferLen() <= 256);

@@ -1,31 +1,12 @@
-#include "LocalTalkConversationSubsystem.h"
-
+﻿#include "LocalTalkConversationSubsystem.h"
 #include "LocalCharacterComponent.h"
 #include "LocalTalkerLog.h"
-
 #include "Engine/World.h"
-
-static double NowSeconds()
-{
-    return FPlatformTime::Seconds();
-}
 
 void ULocalTalkConversationSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
-    const double Now = NowSeconds();
-    LastConversationActivitySeconds = Now;
-    RescheduleIdleChatter(Now);
-}
-
-void ULocalTalkConversationSubsystem::Deinitialize()
-{
-    Talkers.Reset();
-    TalkerStates.Reset();
-    AggregatedBySpeaker.Reset();
-    PendingUtterances.Reset();
-
-    Super::Deinitialize();
+    UE_LOG(LogLocalTalker, Log, TEXT("[Director] Conversation Subsystem Initialized."));
 }
 
 TStatId ULocalTalkConversationSubsystem::GetStatId() const
@@ -35,558 +16,285 @@ TStatId ULocalTalkConversationSubsystem::GetStatId() const
 
 void ULocalTalkConversationSubsystem::Tick(float DeltaTime)
 {
-    Compact();
-    UpdateTalkerStates();
-    ProcessPendingUtterances();
-    TryStartIdleChatter();
+    // Cleanup invalid actors from registry
+    Registry.Remove(nullptr);
+    
+    UpdateContexts();
+    ProcessTurns();
 }
 
 void ULocalTalkConversationSubsystem::RegisterTalker(ULocalCharacterComponent* Talker)
 {
     if (!Talker) return;
-    Talkers.Add(Talker);
-    GetOrCreateTalkerState(Talker);
+    Registry.Add(Talker);
+    UE_LOG(LogLocalTalker, Log, TEXT("[Director] Registered: '%s' (Total: %d)"), 
+        *Talker->GetSpeakerNameResolved(), Registry.Num());
 }
 
 void ULocalTalkConversationSubsystem::UnregisterTalker(ULocalCharacterComponent* Talker)
 {
     if (!Talker) return;
-    Talkers.Remove(Talker);
-    TalkerStates.Remove(Talker);
-    AggregatedBySpeaker.Remove(Talker);
+    
+    FString Name = Talker->GetSpeakerNameResolved();
+    Registry.Remove(Talker);
+    
+    // Remove from manual queue if they were waiting
+    ManualQueue.RemoveAll([Talker](const FQueuedTurn& T) { return T.Talker.Get() == Talker; });
 
-    PendingUtterances.RemoveAll([Talker](const FPendingUtterance& U)
+    UE_LOG(LogLocalTalker, Log, TEXT("[Director] Unregistered: '%s'"), *Name);
+}
+
+void ULocalTalkConversationSubsystem::RequestTurn(ULocalCharacterComponent* Talker, const FString& Prompt)
+{
+    if (!Talker || Prompt.IsEmpty()) return;
+
+    // If it's a user prompt (not RAW and not an instruction), add to history
+    if (!Prompt.StartsWith(TEXT("RAW:")) && !Prompt.StartsWith(TEXT("Respond to ")))
     {
-        return U.SelectedResponder.Get() == Talker;
-    });
-}
-
-ULocalTalkConversationSubsystem::FTalkerState& ULocalTalkConversationSubsystem::GetOrCreateTalkerState(ULocalCharacterComponent* Talker)
-{
-    if (FTalkerState* Existing = TalkerStates.Find(Talker))
-    {
-        return *Existing;
-    }
-
-    FTalkerState NewState;
-    NewState.State = ETalkerState::Idle;
-    NewState.StateStartTime = NowSeconds();
-    TalkerStates.Add(Talker, NewState);
-    return TalkerStates.FindChecked(Talker);
-}
-
-void ULocalTalkConversationSubsystem::SetTalkerState(ULocalCharacterComponent* Talker, ETalkerState NewState)
-{
-    if (!Talker) return;
-    FTalkerState& S = GetOrCreateTalkerState(Talker);
-    S.State = NewState;
-    S.StateStartTime = NowSeconds();
-}
-
-void ULocalTalkConversationSubsystem::NotifyStartedSpeaking(ULocalCharacterComponent* Speaker)
-{
-    if (!Speaker) return;
-    SetTalkerState(Speaker, ETalkerState::Generating);
-}
-
-void ULocalTalkConversationSubsystem::NotifySentenceSpoken(ULocalCharacterComponent* Speaker, const FString& Sentence, bool bFromUser)
-{
-    if (!Speaker) return;
-    if (Sentence.IsEmpty()) return;
-
-    FString& Accum = AggregatedBySpeaker.FindOrAdd(Speaker);
-    if (!Accum.IsEmpty()) Accum += TEXT(" ");
-    Accum += Sentence;
-
-    // Broadcast live context to nearby listeners.
-    const FVector SpeakerLoc = Speaker->GetOwner() ? Speaker->GetOwner()->GetActorLocation() : FVector::ZeroVector;
-    const float Radius = Speaker->ConversationRadius;
-    const float RadiusSq = Radius * Radius;
-    const FString SpeakerName = Speaker->GetResolvedSpeakerName();
-
-    for (const TWeakObjectPtr<ULocalCharacterComponent>& Weak : Talkers)
-    {
-        ULocalCharacterComponent* Listener = Weak.Get();
-        if (!Listener || Listener == Speaker) continue;
-        if (!Listener->bEnableProximityConversation) continue;
-
-        const AActor* LOwner = Listener->GetOwner();
-        if (!LOwner) continue;
-
-        const float DistSq = FVector::DistSquared(LOwner->GetActorLocation(), SpeakerLoc);
-        if (DistSq > RadiusSq) continue;
-
-        Listener->ReceiveBroadcastSpeech(SpeakerName, Sentence, bFromUser);
-    }
-}
-
-void ULocalTalkConversationSubsystem::NotifyFinishedSpeaking(ULocalCharacterComponent* Speaker)
-{
-    if (!Speaker) return;
-    SetTalkerState(Speaker, ETalkerState::PlayingAudio);
-}
-
-void ULocalTalkConversationSubsystem::NotifyAudioPlaybackFinished(ULocalCharacterComponent* Speaker)
-{
-    if (!Speaker) return;
-
-    FTalkerState& S = GetOrCreateTalkerState(Speaker);
-    S.State = ETalkerState::Idle;
-    S.StateStartTime = NowSeconds();
-    S.LastSpokeTime = NowSeconds();
-    S.RecentTurnCount++;
-
-    FString HeardText;
-    if (FString* Accum = AggregatedBySpeaker.Find(Speaker))
-    {
-        HeardText = *Accum;
-    }
-    AggregatedBySpeaker.Remove(Speaker);
-    HeardText.TrimStartAndEndInline();
-    if (HeardText.IsEmpty()) return;
-
-    LastConversationActivitySeconds = NowSeconds();
-    RescheduleIdleChatter(LastConversationActivitySeconds);
-
-    const FVector SpeakerLoc = Speaker->GetOwner() ? Speaker->GetOwner()->GetActorLocation() : FVector::ZeroVector;
-    const float Radius = Speaker->ConversationRadius;
-    const FString SpeakerName = Speaker->GetResolvedSpeakerName();
-
-    // Queue a single "utterance" that will get at most one response.
-    const float ThinkDelay = FMath::FRandRange(Speaker->ThinkingDelayMin, Speaker->ThinkingDelayMax);
-
-    FPendingUtterance Utterance;
-    Utterance.SpeakerName = SpeakerName;
-    Utterance.Text = HeardText;
-    Utterance.Location = SpeakerLoc;
-    Utterance.Radius = Radius;
-    Utterance.TimeReceived = NowSeconds();
-    Utterance.ResponseDueTime = NowSeconds() + ThinkDelay;
-    Utterance.bFromUser = false;
-    Utterance.bResponderSelected = false;
-
-    PendingUtterances.Add(MoveTemp(Utterance));
-}
-
-void ULocalTalkConversationSubsystem::NotifyInterrupted(ULocalCharacterComponent* Speaker)
-{
-    CancelSpeakingInternal(Speaker);
-}
-
-void ULocalTalkConversationSubsystem::BroadcastUserUtterance(const FVector& Location, float Radius, const FString& UserText, bool bInterrupt)
-{
-    if (UserText.IsEmpty()) return;
-    if (Radius <= 0.0f) return;
-
-    LastConversationActivitySeconds = NowSeconds();
-    RescheduleIdleChatter(LastConversationActivitySeconds);
-
-    const float RadiusSq = Radius * Radius;
-
-    struct FCand { ULocalCharacterComponent* Talker = nullptr; float DistSq = 0.0f; };
-    TArray<FCand> Cands;
-
-    for (const TWeakObjectPtr<ULocalCharacterComponent>& Weak : Talkers)
-    {
-        ULocalCharacterComponent* T = Weak.Get();
-        if (!T || !T->bEnableProximityConversation) continue;
-        const AActor* Owner = T->GetOwner();
-        if (!Owner) continue;
-
-        const float DistSq = FVector::DistSquared(Owner->GetActorLocation(), Location);
-        if (DistSq > RadiusSq) continue;
-
-        Cands.Add({ T, DistSq });
-    }
-
-    if (Cands.Num() == 0) return;
-    Cands.Sort([](const FCand& A, const FCand& B) { return A.DistSq < B.DistSq; });
-
-    // Only player/user input may interrupt.
-    if (bInterrupt)
-    {
-        for (const FCand& C : Cands)
+        if (FLocalConversationContext* Context = FindOrCreateContext(Talker))
         {
-            if (!C.Talker) continue;
-            C.Talker->Interrupt();
-            CancelSpeakingInternal(C.Talker);
+            AddMessageToContext(*Context, TEXT("User"), Prompt, true);
         }
     }
 
-    // Everyone hears the user for context.
-    for (const FCand& C : Cands)
+    // Check if they are already in the queue - if so, update their prompt
+    for (FQueuedTurn& Q : ManualQueue)
     {
-        if (!C.Talker) continue;
-        C.Talker->ReceiveBroadcastSpeech(TEXT("User"), UserText, /*bFromUser*/ true);
-    }
-
-    // Queue an utterance that MUST get a response.
-    FPendingUtterance Utterance;
-    Utterance.SpeakerName = TEXT("User");
-    Utterance.Text = UserText;
-    Utterance.Location = Location;
-    Utterance.Radius = Radius;
-    Utterance.TimeReceived = NowSeconds();
-    Utterance.ResponseDueTime = NowSeconds() + FMath::FRandRange(0.2f, 0.6f);
-    Utterance.bFromUser = true;
-    Utterance.bResponderSelected = false;
-
-    PendingUtterances.Add(MoveTemp(Utterance));
-}
-
-bool ULocalTalkConversationSubsystem::IsAnyoneSpeakingNear(const FVector& Location, float Radius) const
-{
-    const float RadiusSq = Radius * Radius;
-
-    for (const auto& Pair : TalkerStates)
-    {
-        ULocalCharacterComponent* Talker = Pair.Key.Get();
-        if (!Talker) continue;
-
-        const FTalkerState& S = Pair.Value;
-        if (S.State == ETalkerState::Idle) continue;
-
-        const AActor* Owner = Talker->GetOwner();
-        if (!Owner) continue;
-
-        if (FVector::DistSquared(Owner->GetActorLocation(), Location) <= RadiusSq)
+        if (Q.Talker.Get() == Talker)
         {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool ULocalTalkConversationSubsystem::IsSpeaking(ULocalCharacterComponent* Talker) const
-{
-    if (!Talker) return false;
-    const FTalkerState* S = TalkerStates.Find(Talker);
-    return S && S->State != ETalkerState::Idle;
-}
-
-void ULocalTalkConversationSubsystem::Compact()
-{
-    Talkers.Remove(nullptr);
-    TalkerStates.Remove(nullptr);
-    AggregatedBySpeaker.Remove(nullptr);
-
-    const double Now = NowSeconds();
-    PendingUtterances.RemoveAll([Now](const FPendingUtterance& U)
-    {
-        // Don't keep ancient pending utterances around forever.
-        return (Now - U.TimeReceived) > 60.0;
-    });
-}
-
-void ULocalTalkConversationSubsystem::UpdateTalkerStates()
-{
-    const double Now = NowSeconds();
-
-    for (auto& Pair : TalkerStates)
-    {
-        FTalkerState& S = Pair.Value;
-        if (S.LastSpokeTime > 0.0 && (Now - S.LastSpokeTime) > RecentTurnWindow)
-        {
-            S.RecentTurnCount = FMath::Max(0, S.RecentTurnCount - 1);
-        }
-    }
-}
-
-void ULocalTalkConversationSubsystem::ProcessPendingUtterances()
-{
-    const double Now = NowSeconds();
-
-    for (int32 i = PendingUtterances.Num() - 1; i >= 0; i--)
-    {
-        FPendingUtterance& Utterance = PendingUtterances[i];
-
-        if (Utterance.bResponderSelected)
-        {
-            ULocalCharacterComponent* Responder = Utterance.SelectedResponder.Get();
-            if (!Responder)
-            {
-                PendingUtterances.RemoveAt(i);
-                continue;
-            }
-
-            if (IsAnyoneSpeakingNear(Utterance.Location, Utterance.Radius))
-            {
-                continue;
-            }
-
-            if (!CanRespond(Responder))
-            {
-                continue;
-            }
-
-            DispatchResponse(Responder, Utterance);
-            PendingUtterances.RemoveAt(i);
-            continue;
-        }
-
-        if (Now < Utterance.ResponseDueTime)
-        {
-            continue;
-        }
-
-        if (IsAnyoneSpeakingNear(Utterance.Location, Utterance.Radius))
-        {
-            Utterance.ResponseDueTime = Now + 0.35;
-            continue;
-        }
-
-        SelectResponderForUtterance(Utterance);
-    }
-}
-
-void ULocalTalkConversationSubsystem::SelectResponderForUtterance(FPendingUtterance& Utterance)
-{
-    const double Now = NowSeconds();
-    const float RadiusSq = Utterance.Radius * Utterance.Radius;
-
-    struct FCandidate
-    {
-        ULocalCharacterComponent* Talker = nullptr;
-        float Priority = 0.0f;
-        float DistSq = 0.0f;
-    };
-    TArray<FCandidate> Candidates;
-
-    for (const TWeakObjectPtr<ULocalCharacterComponent>& Weak : Talkers)
-    {
-        ULocalCharacterComponent* Talker = Weak.Get();
-        if (!Talker) continue;
-        if (!Talker->bEnableProximityConversation) continue;
-        if (!Talker->bAutoRespondToHeardSpeech) continue;
-
-        if (Talker->GetResolvedSpeakerName() == Utterance.SpeakerName) continue;
-
-        const AActor* Owner = Talker->GetOwner();
-        if (!Owner) continue;
-
-        const float DistSq = FVector::DistSquared(Owner->GetActorLocation(), Utterance.Location);
-        if (DistSq > RadiusSq) continue;
-
-        if (!CanRespond(Talker)) continue;
-
-        const float Priority = CalculateResponsePriority(Talker, Utterance);
-        if (Priority <= 0.0f) continue;
-
-        Candidates.Add({ Talker, Priority, DistSq });
-    }
-
-    if (Candidates.Num() == 0)
-    {
-        if (Utterance.bFromUser)
-        {
-            // ALWAYS respond to the user: keep retrying until someone becomes available.
-            Utterance.ResponseDueTime = Now + 0.25;
-            Utterance.bResponderSelected = false;
+            Q.Prompt = Prompt;
             return;
         }
-
-        // NPC utterance can be dropped if nobody is able/willing to respond.
-        Utterance.bResponderSelected = true;
-        Utterance.SelectedResponder = nullptr;
-        return;
     }
 
-    // Sort by priority desc; tie-break by distance asc.
-    Candidates.Sort([](const FCandidate& A, const FCandidate& B)
+    ManualQueue.Add({ Talker, Prompt });
+    
+    UE_LOG(LogLocalTalker, Log, TEXT("[Director] '%s' requested turn (Manual Queue length: %d)"), 
+        *Talker->GetSpeakerNameResolved(), ManualQueue.Num());
+}
+
+void ULocalTalkConversationSubsystem::ReleaseTurn(ULocalCharacterComponent* Talker)
+{
+    if (!Talker) return;
+    
+    UE_LOG(LogLocalTalker, Log, TEXT("[Director] '%s' finished talking."), *Talker->GetSpeakerNameResolved());
+
+    // If the talker didn't emit any speech this turn, do NOT auto-trigger a response.
+    // This prevents infinite ping-pong when an LLM/TTS path fails and characters immediately "finish".
+    if (!Talker->bSpokeThisTurn)
     {
-        if (A.Priority != B.Priority) return A.Priority > B.Priority;
-        return A.DistSq < B.DistSq;
+        return;
+    }
+    
+    // When someone finished, evaluate if someone else in their group should respond
+    if (FLocalConversationContext* Context = FindOrCreateContext(Talker))
+    {
+        EvaluateNextSpeaker(*Context, Talker);
+    }
+}
+
+void ULocalTalkConversationSubsystem::BroadcastSentence(ULocalCharacterComponent* Speaker, const FString& Text, bool bFromUser)
+{
+    if (!Speaker || Text.IsEmpty()) return;
+
+    FLocalConversationContext* Context = FindOrCreateContext(Speaker);
+    if (!Context) return;
+
+    FString SpeakerName = Speaker->GetSpeakerNameResolved();
+    UE_LOG(LogLocalTalker, Log, TEXT("[Director] %s: %s"), *SpeakerName, *Text);
+
+    AddMessageToContext(*Context, SpeakerName, Text, bFromUser);
+
+    // Notify listeners in the context
+    for (auto& WeakParticipant : Context->Participants)
+    {
+        ULocalCharacterComponent* Listener = WeakParticipant.Get();
+        if (Listener && Listener != Speaker)
+        {
+            Listener->OnHeardSpeech(SpeakerName, Text, bFromUser);
+        }
+    }
+}
+
+TArray<FLocalTalkMessage> ULocalTalkConversationSubsystem::GetContextHistory(ULocalCharacterComponent* Agent)
+{
+    if (FLocalConversationContext* Context = FindOrCreateContext(Agent))
+    {
+        return Context->History;
+    }
+    return TArray<FLocalTalkMessage>();
+}
+
+void ULocalTalkConversationSubsystem::UpdateContexts()
+{
+    UWorld* W = GetWorld();
+    if (!W) return;
+    float CurrentTime = W->GetTimeSeconds();
+
+    // 1. Cleanup old contexts (inactive for > 30s)
+    ActiveContexts.RemoveAll([CurrentTime](const FLocalConversationContext& C) {
+        return (CurrentTime - C.LastInteractionTime) > 30.0f;
     });
 
-    // For user utterances: pick best candidate deterministically (closest/highest priority).
-    // For NPC utterances: small randomization so it doesn't feel rigid.
-    int32 SelectedIdx = 0;
-    if (!Utterance.bFromUser && Candidates.Num() > 1 && FMath::FRand() > 0.75f)
+    // 2. Refresh participants for each context based on proximity to context center
+    for (auto& Context : ActiveContexts)
     {
-        SelectedIdx = 1;
-    }
+        Context.Participants.Empty();
+        for (auto& WeakAgent : Registry)
+        {
+            ULocalCharacterComponent* Agent = WeakAgent.Get();
+            if (!Agent || !Agent->GetOwner()) continue;
 
-    Utterance.bResponderSelected = true;
-    Utterance.SelectedResponder = Candidates[SelectedIdx].Talker;
+            float Dist = FVector::Dist(Agent->GetOwner()->GetActorLocation(), Context.LastCenter);
+            if (Dist < Agent->ConversationRadius)
+            {
+                Context.Participants.Add(Agent);
+            }
+        }
+    }
 }
 
-float ULocalTalkConversationSubsystem::CalculateResponsePriority(ULocalCharacterComponent* Candidate, const FPendingUtterance& Utterance) const
+FLocalConversationContext* ULocalTalkConversationSubsystem::FindOrCreateContext(ULocalCharacterComponent* Agent)
 {
-    if (!Candidate) return 0.0f;
+    if (!Agent || !Agent->GetOwner()) return nullptr;
+    FVector Loc = Agent->GetOwner()->GetActorLocation();
 
-    // NPC-to-NPC chatter gate (user utterances bypass this: ALWAYS respond).
-    if (!Utterance.bFromUser)
+    // Try to find an existing context near this location
+    for (auto& Context : ActiveContexts)
     {
-        if (FMath::FRand() > Candidate->ResponseLikelihood)
+        if (FVector::Dist(Context.LastCenter, Loc) < Agent->ConversationRadius)
         {
-            return 0.0f;
+            // If we found one, update its center to reflect ongoing activity
+            Context.LastCenter = FMath::Lerp(Context.LastCenter, Loc, 0.2f);
+            return &Context;
         }
     }
 
-    float Priority = 1.0f;
+    // Create new context
+    FLocalConversationContext NewContext;
+    NewContext.LastCenter = Loc;
+    NewContext.LastInteractionTime = GetWorld()->GetTimeSeconds();
+    NewContext.Participants.Add(Agent);
+    int32 Index = ActiveContexts.Add(NewContext);
+    return &ActiveContexts[Index];
+}
 
-    if (Utterance.bFromUser)
-    {
-        Priority *= Candidate->UserResponsePriorityBoost;
-    }
-    else
-    {
-        Priority *= FMath::Max(0.01f, Candidate->ResponseLikelihood);
-    }
+void ULocalTalkConversationSubsystem::AddMessageToContext(FLocalConversationContext& Context, const FString& Speaker, const FString& Text, bool bFromUser)
+{
+    Context.History.Add({ Speaker, Text, bFromUser });
+    if (Context.History.Num() > 10) Context.History.RemoveAt(0);
+    Context.LastInteractionTime = GetWorld()->GetTimeSeconds();
+}
 
-    Priority *= FMath::FRandRange(0.9f, 1.1f);
-
-    const AActor* Owner = Candidate->GetOwner();
-    if (Owner)
+void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationContext& Context, ULocalCharacterComponent* LastSpeaker)
+{
+    // Don't start a new turn if someone is still busy (LLM processing or TTS speaking)
+    for (auto& Weak : Context.Participants)
     {
-        const float DistSq = FVector::DistSquared(Owner->GetActorLocation(), Utterance.Location);
-        const float MaxDistSq = Utterance.Radius * Utterance.Radius;
-        const float DistFactor = 1.0f - FMath::Clamp(DistSq / MaxDistSq, 0.0f, 1.0f);
-        Priority *= (0.5f + 0.5f * DistFactor);
-    }
-
-    const FTalkerState* S = TalkerStates.Find(Candidate);
-    if (S && S->RecentTurnCount > 0)
-    {
-        Priority *= FMath::Pow(0.7f, (float)S->RecentTurnCount);
-    }
-
-    if (S && S->LastSpokeTime > 0.0)
-    {
-        const double TimeSinceSpoke = NowSeconds() - S->LastSpokeTime;
-        if (TimeSinceSpoke < TurnCooldownSeconds)
+        if (ULocalCharacterComponent* P = Weak.Get())
         {
-            Priority *= (float)(TimeSinceSpoke / TurnCooldownSeconds);
+            if (P->IsBusy()) return;
         }
     }
 
-    return Priority;
-}
-
-bool ULocalTalkConversationSubsystem::CanRespond(ULocalCharacterComponent* Talker) const
-{
-    if (!Talker) return false;
-
-    const FTalkerState* S = TalkerStates.Find(Talker);
-    if (S && S->State != ETalkerState::Idle) return false;
-
-    if (Talker->IsSpeaking()) return false;
-
-    if (S && S->LastSpokeTime > 0.0)
+    if (Context.History.Num() <= 0)
     {
-        const double TimeSinceSpoke = NowSeconds() - S->LastSpokeTime;
-        if (TimeSinceSpoke < (double)Talker->MinSecondsBetweenTurns)
-        {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-void ULocalTalkConversationSubsystem::DispatchResponse(ULocalCharacterComponent* Responder, const FPendingUtterance& Utterance)
-{
-    if (!Responder) return;
-
-    const FString Prompt = Utterance.bFromUser
-        ? Utterance.Text
-        : FString::Printf(TEXT("Respond to what you just heard from %s:\n%s"), *Utterance.SpeakerName, *Utterance.Text);
-
-    Responder->SendPromptAndSpeakStreamingInProc(Prompt);
-}
-
-void ULocalTalkConversationSubsystem::RescheduleIdleChatter(double Now)
-{
-    // Find any talker with idle chatter enabled; use their min/max as bounds (pick conservative min/max).
-    float MinSilence = 999999.0f;
-    float MaxSilence = 0.0f;
-
-    for (const TWeakObjectPtr<ULocalCharacterComponent>& Weak : Talkers)
-    {
-        const ULocalCharacterComponent* T = Weak.Get();
-        if (!T) continue;
-        if (!T->bEnableIdleChatter) continue;
-        MinSilence = FMath::Min(MinSilence, T->IdleChatterMinSilenceSeconds);
-        MaxSilence = FMath::Max(MaxSilence, T->IdleChatterMaxSilenceSeconds);
-    }
-
-    if (MaxSilence <= 0.0f || MinSilence > MaxSilence)
-    {
-        NextIdleChatterDueSeconds = 0.0;
         return;
     }
 
-    const float Delay = FMath::FRandRange(MinSilence, MaxSilence);
-    NextIdleChatterDueSeconds = Now + Delay;
+    const FLocalTalkMessage& LastMsg = Context.History.Last();
+
+    // Default rule: only auto-respond to USER messages to avoid NPC<->NPC runaway loops.
+    if (!LastMsg.bFromUser)
+    {
+        return;
+    }
+
+    // Logic: Pick someone other than the last speaker to respond
+    // In a more complex version, this could use priority, personality, etc.
+    for (auto& Weak : Context.Participants)
+    {
+        ULocalCharacterComponent* Candidate = Weak.Get();
+        if (Candidate && Candidate != LastSpeaker && !Candidate->IsBusy())
+        {
+            // Only respond if the last message was within a reasonable timeframe
+            const float TimeSinceLast = GetWorld()->GetTimeSeconds() - Context.LastInteractionTime;
+            if (TimeSinceLast < 5.0f)
+            {
+                FString Prompt = FString::Printf(TEXT("Respond to %s: %s"), *LastMsg.SpeakerName, *LastMsg.Content);
+                UE_LOG(LogLocalTalker, Log, TEXT("[Director] -> TRIGGERING RESPONSE from '%s'"), *Candidate->GetSpeakerNameResolved());
+                Candidate->InternalGrantTurn(Prompt);
+                return;
+            }
+        }
+    }
 }
 
-void ULocalTalkConversationSubsystem::TryStartIdleChatter()
+void ULocalTalkConversationSubsystem::ProcessTurns()
 {
-    const double Now = NowSeconds();
-    if (NextIdleChatterDueSeconds <= 0.0) return;
-    if (Now < NextIdleChatterDueSeconds) return;
-
-    // Only start idle chatter if the world is quiet.
-    if (PendingUtterances.Num() > 0) { NextIdleChatterDueSeconds = Now + 5.0; return; }
-    if (IsAnyoneSpeakingNear(FVector::ZeroVector, TNumericLimits<float>::Max())) { NextIdleChatterDueSeconds = Now + 5.0; return; }
-
-    // Find eligible initiators (idle, enabled, and has at least one other talker nearby).
-    TArray<ULocalCharacterComponent*> Eligible;
-
-    for (const TWeakObjectPtr<ULocalCharacterComponent>& Weak : Talkers)
+    // Handle manual requests (e.g. Player interaction or scripted events)
+    for (int32 i = 0; i < ManualQueue.Num(); i++)
     {
-        ULocalCharacterComponent* T = Weak.Get();
-        if (!T) continue;
-        if (!T->bEnableProximityConversation) continue;
-        if (!T->bEnableIdleChatter) continue;
-        if (!CanRespond(T)) continue;
-        if (!T->GetOwner()) continue;
-
-        const FVector Loc = T->GetOwner()->GetActorLocation();
-        const float RadiusSq = T->ConversationRadius * T->ConversationRadius;
-
-        bool bHasListener = false;
-        for (const TWeakObjectPtr<ULocalCharacterComponent>& Weak2 : Talkers)
+        ULocalCharacterComponent* T = ManualQueue[i].Talker.Get();
+        if (!T)
         {
-            ULocalCharacterComponent* Other = Weak2.Get();
-            if (!Other || Other == T) continue;
-            if (!Other->bEnableProximityConversation) continue;
-            if (!Other->GetOwner()) continue;
-            if (FVector::DistSquared(Other->GetOwner()->GetActorLocation(), Loc) <= RadiusSq)
+            ManualQueue.RemoveAt(i);
+            i--;
+            continue;
+        }
+
+        if (T->IsBusy()) continue;
+
+        // Check if ANYONE in this talker's context is busy
+        bool bContextBusy = false;
+        if (FLocalConversationContext* Context = FindOrCreateContext(T))
+        {
+            for (auto& Weak : Context->Participants)
             {
-                bHasListener = true;
-                break;
+                if (ULocalCharacterComponent* P = Weak.Get())
+                {
+                    if (P->IsBusy())
+                    {
+                        bContextBusy = true;
+                        break;
+                    }
+                }
             }
         }
 
-        if (bHasListener)
+        if (!bContextBusy)
         {
-            Eligible.Add(T);
+            FString Prompt = ManualQueue[i].Prompt;
+            ManualQueue.RemoveAt(i);
+            i--;
+
+            UE_LOG(LogLocalTalker, Log, TEXT("[Director] -> GRANTING TURN to: '%s'"), *T->GetSpeakerNameResolved());
+            T->InternalGrantTurn(Prompt);
         }
     }
-
-    if (Eligible.Num() == 0)
-    {
-        NextIdleChatterDueSeconds = Now + 10.0;
-        return;
-    }
-
-    ULocalCharacterComponent* Speaker = Eligible[FMath::RandRange(0, Eligible.Num() - 1)];
-    if (!Speaker) { NextIdleChatterDueSeconds = Now + 10.0; return; }
-
-    const FString Prompt = !Speaker->IdleChatterPrompt.IsEmpty()
-        ? Speaker->IdleChatterPrompt
-        : TEXT("After a long silence, say one short, natural line to nearby people. Keep it brief (1 sentence). Do not ask a question unless necessary.");
-
-    LastConversationActivitySeconds = Now;
-    RescheduleIdleChatter(Now);
-
-    Speaker->SendPromptAndSpeakStreamingInProc(Prompt);
 }
 
-void ULocalTalkConversationSubsystem::CancelSpeakingInternal(ULocalCharacterComponent* Speaker)
+void ULocalTalkConversationSubsystem::InterruptProximity(const FVector& Location, float Radius)
 {
-    if (!Speaker) return;
-    SetTalkerState(Speaker, ETalkerState::Idle);
-    AggregatedBySpeaker.Remove(Speaker);
+    const float RadiusSq = Radius * Radius;
+    for (const TWeakObjectPtr<ULocalCharacterComponent>& Weak : Registry)
+    {
+        ULocalCharacterComponent* T = Weak.Get();
+        if (!T || !T->GetOwner()) continue;
+
+        if (FVector::DistSquared(T->GetOwner()->GetActorLocation(), Location) <= RadiusSq)
+        {
+            T->Interrupt();
+        }
+    }
+}
+
+TArray<ULocalCharacterComponent*> ULocalTalkConversationSubsystem::GetRegisteredTalkers() const
+{
+    TArray<ULocalCharacterComponent*> Result;
+    for (const TWeakObjectPtr<ULocalCharacterComponent>& Weak : Registry)
+    {
+        if (Weak.IsValid()) Result.Add(Weak.Get());
+    }
+    return Result;
 }
