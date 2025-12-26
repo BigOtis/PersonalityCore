@@ -1,0 +1,11 @@
+Piper voice model notice
+
+This plugin bundles a default Piper voice model:
+
+- `Resources/Voices/en_US-lessac-small.onnx`
+- `Resources/Voices/en_US-lessac-small.onnx.json`
+
+These files are downloaded from the `rhasspy/piper-voices` distribution.
+Before shipping on Fab, confirm and include the applicable license/attribution for the exact voice you bundle.
+
+

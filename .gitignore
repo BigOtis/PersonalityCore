@@ -1,0 +1,60 @@
+# Unreal Engine .gitignore
+
+# Visual Studio / Rider
+.vscode/
+.vs/
+.idea/
+*.suo
+*.user
+*.sln.docstates
+*.rsuser
+
+# Build artifacts
+Binaries/
+Intermediate/
+Build/
+DerivedDataCache/
+
+# Saved data (logs, autosaves, local configs)
+Saved/
+
+# Plugin binaries and intermediates
+Plugins/*/Binaries/
+Plugins/*/Intermediate/
+StarterContent/
+
+# Third-party binaries (large files, downloaded separately)
+Plugins/*/ThirdParty/
+
+# Unreal generated files
+*.VC.db
+*.VC.db-shm
+*.VC.db-wal
+*.VC.opendb
+*.opensdf
+*.sdf
+
+# Compiled shader caches
+*.shaderbin
+
+# Asset hot-reload backups
+*_BuiltData.uasset
+
+# Crash reports
+CrashReportClient.ini
+
+# macOS
+.DS_Store
+*.dSYM/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Workspace files (user-specific)
+*.code-workspace
+
+# Ignore downloaded models/voices (large binary files)
+Plugins/LocalTalker/Resources/Models/*.gguf
+Plugins/LocalTalker/Resources/Voices/*.onnx
+Plugins/LocalTalker/Resources/Voices/*.onnx.json

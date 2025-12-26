@@ -1,0 +1,16 @@
+{
+  "FileVersion": 3,
+  "Version": 2,
+  "VersionName": "0.2.0",
+  "FriendlyName": "LocalTalker",
+  "Description": "Local characters powered by on-device LLM (llama.cpp) + on-device TTS (Piper). Blueprint-first with streaming text + streaming speech.",
+  "Category": "AI",
+  "CreatedBy": "OtisFuse",
+  "CanContainContent": true,
+  "IsBetaVersion": true,
+  "IsExperimentalVersion": true,
+  "Installed": false,
+  "Modules": [
+    { "Name": "LocalTalker", "Type": "Runtime", "LoadingPhase": "Default" }
+  ]
+}
