@@ -41,6 +41,11 @@ struct FLocalConversationContext
 
     UPROPERTY()
     float LastInteractionTime = 0.0f;
+
+    // Counts consecutive non-user messages since the last user message.
+    // Used to cap NPC-to-NPC auto-response loops.
+    UPROPERTY()
+    int32 ConsecutiveNpcTurns = 0;
 };
 
 /**

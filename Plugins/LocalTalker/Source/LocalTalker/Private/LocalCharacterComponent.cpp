@@ -33,6 +33,95 @@ static FString LocalTalkerOneLineTrunc(const FString& In, int32 MaxChars)
     return (MaxChars > 0 && S.Len() > MaxChars) ? S.Left(MaxChars) + TEXT("...") : S;
 }
 
+// Best-effort cleanup so model output becomes "dialogue", not chat transcripts.
+// - Collapses whitespace/newlines
+// - Removes leading role/speaker prefixes ("Assistant:", "User:", "Milo:", etc.)
+static FString LocalTalkerSanitizeDialogueLine(const FString& In)
+{
+    // Normalize line breaks -> spaces
+    FString S = In;
+    S.ReplaceInline(TEXT("\r"), TEXT(" "));
+    S.ReplaceInline(TEXT("\n"), TEXT(" "));
+
+    // Collapse whitespace runs
+    FString Out;
+    Out.Reserve(S.Len());
+    bool bPrevWs = false;
+    for (int32 i = 0; i < S.Len(); i++)
+    {
+        const TCHAR C = S[i];
+        const bool bWs = FChar::IsWhitespace(C) != 0;
+        if (bWs)
+        {
+            if (!bPrevWs)
+            {
+                Out.AppendChar(TEXT(' '));
+                bPrevWs = true;
+            }
+            continue;
+        }
+        bPrevWs = false;
+        Out.AppendChar(C);
+    }
+    Out.TrimStartAndEndInline();
+
+    // Strip known prefixes repeatedly (models sometimes emit "Assistant: Assistant: ...").
+    // Keep this small + deterministic; if the prompt/template is correct, this should rarely trigger.
+    auto StripPrefix = [&Out](const TCHAR* Prefix) -> bool
+    {
+        const int32 PrefixLen = FCString::Strlen(Prefix);
+        if (Out.Len() >= PrefixLen && Out.Left(PrefixLen).Equals(Prefix, ESearchCase::IgnoreCase))
+        {
+            Out = Out.Mid(PrefixLen);
+            Out.TrimStartAndEndInline();
+            return true;
+        }
+        return false;
+    };
+
+    bool bStrippedAny = false;
+    for (;;)
+    {
+        bool bStrippedThisLoop = false;
+
+        bStrippedThisLoop |= StripPrefix(TEXT("Assistant:"));
+        bStrippedThisLoop |= StripPrefix(TEXT("User:"));
+        bStrippedThisLoop |= StripPrefix(TEXT("System:"));
+        bStrippedThisLoop |= StripPrefix(TEXT("NPC:"));
+        bStrippedThisLoop |= StripPrefix(TEXT("<|assistant|>"));
+        bStrippedThisLoop |= StripPrefix(TEXT("<|user|>"));
+        bStrippedThisLoop |= StripPrefix(TEXT("<|system|>"));
+        bStrippedThisLoop |= StripPrefix(TEXT("</s>"));
+        bStrippedThisLoop |= StripPrefix(TEXT("[INST]"));
+        bStrippedThisLoop |= StripPrefix(TEXT("[/INST]"));
+
+        // Generic "Name:" prefix (single token up to 24 chars, no spaces).
+        int32 ColonIdx = Out.Find(TEXT(":"), ESearchCase::IgnoreCase, ESearchDir::FromStart);
+        if (ColonIdx > 0 && ColonIdx <= 24)
+        {
+            const FString Left = Out.Left(ColonIdx);
+            if (!Left.Contains(TEXT(" ")) && !Left.Contains(TEXT("\t")))
+            {
+                Out = Out.Mid(ColonIdx + 1);
+                Out.TrimStartAndEndInline();
+                bStrippedThisLoop = true;
+            }
+        }
+
+        bStrippedAny |= bStrippedThisLoop;
+        if (!bStrippedThisLoop) break;
+    }
+
+    // If we stripped a prefix, do one more whitespace collapse (prefix removal can expose double spaces)
+    if (bStrippedAny)
+    {
+        Out.ReplaceInline(TEXT("  "), TEXT(" "));
+        Out.TrimStartAndEndInline();
+    }
+
+    return Out;
+}
+
 ULocalCharacterComponent::ULocalCharacterComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
@@ -69,6 +158,24 @@ void ULocalCharacterComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 
     ExtractAndEnqueueSentences(false);
     PumpAudioToProcedural();
+
+    // If the procedural audio is "stuck playing" after the last chunk, force-stop it after a short tail.
+    // This prevents long turn handoff delays between speakers.
+    if (bIsSpeakingInternal && bLLMFinished && bAudioQueueDrained && PendingSentenceCount.GetValue() == 0 && PendingAudioChunkCount.GetValue() == 0)
+    {
+        if (AudioComp && AudioComp->IsPlaying())
+        {
+            const uint64 Enq = LastAudioEnqueueCycles.Load();
+            if (Enq != 0)
+            {
+                const double Since = FPlatformTime::ToSeconds64(FPlatformTime::Cycles64() - Enq);
+                if (Since >= (double)TurnReleaseAudioTailSeconds)
+                {
+                    AudioComp->Stop();
+                }
+            }
+        }
+    }
 
     // Check if we finished our turn
     if (bIsSpeakingInternal && bLLMFinished && PendingSentenceCount.GetValue() == 0 && PendingAudioChunkCount.GetValue() == 0 && bAudioQueueDrained)
@@ -142,10 +249,47 @@ void ULocalCharacterComponent::InternalGrantTurn(const FString& PromptOrText)
     }
     else
     {
-        const FLocalTalkerCharacterConfig Config = ResolveConfig();
-        const FString PromptText = BuildPromptWithHistory(Config, PromptOrText);
-        
-        ActiveLLM = ULocalTalkerInProcGenerateAsync::GenerateStreamingInProcWithPromptText(this, ResolvePaths(), Config, PromptText);
+        // IMPORTANT:
+        // Use the in-proc backend's own prompt wrapper (see LocalTalkerInProcAsync::BuildPrompt),
+        // which includes an output contract ("ONE line of spoken dialogue") and avoids chatty
+        // "User:" / "Assistant:" transcript leakage.
+        //
+        // We still include short rolling history in the *user prompt* so the model has context.
+        FLocalTalkerCharacterConfig Config = ResolveConfig();
+
+        // Map per-character fields into the config used by the prompt wrapper.
+        if (!Directions.IsEmpty()) Config.Directions = Directions;
+        if (!Desc.IsEmpty()) Config.CharacterDescription = Desc;
+
+        FString UserPrompt = PromptOrText;
+        if (UWorld* W = GetWorld())
+        {
+            if (auto* Sub = W->GetSubsystem<ULocalTalkConversationSubsystem>())
+            {
+                const TArray<FLocalTalkMessage> FullHistory = Sub->GetContextHistory(this);
+                if (FullHistory.Num() > 0)
+                {
+                    FString H;
+                    H += TEXT("Conversation so far:\n");
+                    for (const auto& M : FullHistory)
+                    {
+                        // History may contain old transcript-y content; sanitize lightly for better conditioning.
+                        const FString Clean = LocalTalkerSanitizeDialogueLine(M.Content);
+                        if (!Clean.IsEmpty())
+                        {
+                            // Avoid "Name: ..." formatting in the conditioning text; it encourages the model
+                            // to emit speaker-label transcripts. Prefer a narrative framing.
+                            H += FString::Printf(TEXT("%s said \"%s\".\n"), *M.SpeakerName, *Clean);
+                        }
+                    }
+                    H += TEXT("\n");
+                    H += UserPrompt;
+                    UserPrompt = MoveTemp(H);
+                }
+            }
+        }
+
+        ActiveLLM = ULocalTalkerInProcGenerateAsync::GenerateStreamingInProc(this, ResolvePaths(), Config, UserPrompt);
         ActiveLLM->OnToken.AddDynamic(this, &ULocalCharacterComponent::HandleLLMToken);
         ActiveLLM->OnDelta.AddDynamic(this, &ULocalCharacterComponent::HandleLLMDelta);
         ActiveLLM->OnCompleted.AddDynamic(this, &ULocalCharacterComponent::HandleLLMCompleted);
@@ -204,7 +348,7 @@ FString ULocalCharacterComponent::GetSpeakerNameResolved() const
 
 void ULocalCharacterComponent::EnqueueSentence(const FString& Sentence)
 {
-    FString S = Sentence.TrimStartAndEnd();
+    FString S = LocalTalkerSanitizeDialogueLine(Sentence);
     if (S.IsEmpty()) return;
 
     bSpokeThisTurn = true;
@@ -615,6 +759,7 @@ void ULocalCharacterComponent::RunPiperSentenceToAudioQueue(const FString& Sente
 
     PendingAudioChunkCount.Increment();
     AudioQueue.Enqueue(MoveTemp(Chunk));
+    LastAudioEnqueueCycles.Store(FPlatformTime::Cycles64());
 
     // Best-effort cleanup
     IFileManager::Get().Delete(*WavPath, false, true, true);

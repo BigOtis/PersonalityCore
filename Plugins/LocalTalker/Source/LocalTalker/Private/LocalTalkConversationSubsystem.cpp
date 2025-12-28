@@ -1,7 +1,43 @@
 ﻿#include "LocalTalkConversationSubsystem.h"
 #include "LocalCharacterComponent.h"
+#include "LocalTalkerSettings.h"
 #include "LocalTalkerLog.h"
 #include "Engine/World.h"
+#include "GameFramework/PlayerController.h"
+#include "GameFramework/Pawn.h"
+
+static bool LocalTalkerIsAnyPlayerPawnInHearingRange(const UWorld* World, const FLocalConversationContext& Context)
+{
+    if (!World) return false;
+    if (Context.Participants.Num() == 0) return false;
+
+    for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+    {
+        const APlayerController* PC = It->Get();
+        if (!PC) continue;
+        const APawn* Pawn = PC->GetPawn();
+        if (!Pawn) continue;
+
+        const FVector PawnLoc = Pawn->GetActorLocation();
+
+        // "In range to hear" = within any participant's ConversationRadius.
+        for (const auto& WeakP : Context.Participants)
+        {
+            const ULocalCharacterComponent* P = WeakP.Get();
+            if (!P || !P->GetOwner()) continue;
+            const float R = FMath::Max(0.0f, P->ConversationRadius);
+            if (R <= 0.0f) continue;
+
+            const FVector TalkerLoc = P->GetOwner()->GetActorLocation();
+            if (FVector::DistSquared(PawnLoc, TalkerLoc) <= (R * R))
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
 
 void ULocalTalkConversationSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -184,6 +220,15 @@ void ULocalTalkConversationSubsystem::AddMessageToContext(FLocalConversationCont
     Context.History.Add({ Speaker, Text, bFromUser });
     if (Context.History.Num() > 10) Context.History.RemoveAt(0);
     Context.LastInteractionTime = GetWorld()->GetTimeSeconds();
+
+    if (bFromUser)
+    {
+        Context.ConsecutiveNpcTurns = 0;
+    }
+    else
+    {
+        Context.ConsecutiveNpcTurns++;
+    }
 }
 
 void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationContext& Context, ULocalCharacterComponent* LastSpeaker)
@@ -204,10 +249,27 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
 
     const FLocalTalkMessage& LastMsg = Context.History.Last();
 
-    // Default rule: only auto-respond to USER messages to avoid NPC<->NPC runaway loops.
+    const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>();
+    const bool bAllowNpcToNpc = S ? S->bAllowNpcToNpcAuto : false;
+    const int32 MaxNpcTurns = S ? S->MaxConsecutiveNpcTurns : 0;
+    const float MinDelay = S ? S->MinSecondsBetweenAutoReplies : 0.0f;
+    const bool bRequireListener = S ? S->bRequirePlayerListenerForAuto : false;
+
+    // Default rule: auto-respond to USER messages. Optionally allow NPC-to-NPC within a capped streak.
     if (!LastMsg.bFromUser)
     {
-        return;
+        if (!bAllowNpcToNpc)
+        {
+            return;
+        }
+        if (bRequireListener && !LocalTalkerIsAnyPlayerPawnInHearingRange(GetWorld(), Context))
+        {
+            return;
+        }
+        if (MaxNpcTurns > 0 && Context.ConsecutiveNpcTurns > MaxNpcTurns)
+        {
+            return;
+        }
     }
 
     // Logic: Pick someone other than the last speaker to respond
@@ -219,7 +281,7 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
         {
             // Only respond if the last message was within a reasonable timeframe
             const float TimeSinceLast = GetWorld()->GetTimeSeconds() - Context.LastInteractionTime;
-            if (TimeSinceLast < 5.0f)
+            if (TimeSinceLast >= MinDelay && TimeSinceLast < 5.0f)
             {
                 FString Prompt = FString::Printf(TEXT("Respond to %s: %s"), *LastMsg.SpeakerName, *LastMsg.Content);
                 UE_LOG(LogLocalTalker, Log, TEXT("[Director] -> TRIGGERING RESPONSE from '%s'"), *Candidate->GetSpeakerNameResolved());

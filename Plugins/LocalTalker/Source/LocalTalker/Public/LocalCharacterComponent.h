@@ -48,6 +48,11 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Streaming TTS")
     int32 MinCharsBeforeSpeak = 24;
 
+    // Procedural audio can keep "playing" with a silent tail; this controls how quickly we force-stop it
+    // once we know no more chunks are coming, so the Director can hand off the turn promptly.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Streaming TTS", meta=(ClampMin="0.0"))
+    float TurnReleaseAudioTailSeconds = 0.20f;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Subtitles")
     FString SpeakerName;
 
@@ -170,6 +175,9 @@ private:
     FThreadSafeCounter PendingAudioChunkCount;
     FThreadSafeBool bAudioQueueDrained = false;
     bool bNotifiedSubsystemFinished = false;
+
+    // Updated from the TTS worker thread; read on game thread.
+    TAtomic<uint64> LastAudioEnqueueCycles { 0 };
 
     void EnsureAudio();
     void StartTTSWorker(const FLocalTalkerRuntimePaths& Paths);

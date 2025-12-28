@@ -30,6 +30,49 @@ static FString LocalTalkerOneLineTrunc(const FString& In, int32 MaxChars)
     return S;
 }
 
+static FString LocalTalkerNormalizeTokenPiece(FString Piece)
+{
+    // Some tokenizers use U+2581 (LOWER ONE EIGHTH BLOCK) as a visible "space" marker.
+    // Convert it to a real space.
+    Piece.ReplaceInline(TEXT("\u2581"), TEXT(" "));
+    return Piece;
+}
+
+static bool LocalTalkerShouldStopEarly(const FString& FullOut)
+{
+    // Deterministic "dialogue mode" stopping rules:
+    // - Stop at first newline
+    // - Stop after a reasonable one-line length
+    // - Stop after terminal punctuation once we have a minimal amount of content
+    if (FullOut.Contains(TEXT("\n")) || FullOut.Contains(TEXT("\r")))
+    {
+        return true;
+    }
+
+    // Hard cap: keep it a single line suitable for speech.
+    if (FullOut.Len() >= 220)
+    {
+        return true;
+    }
+
+    // If we already have a chunk, stop when we reach a sentence end.
+    if (FullOut.Len() >= 40)
+    {
+        const TCHAR Last = FullOut[FullOut.Len() - 1];
+        if (Last == '.' || Last == '!' || Last == '?' )
+        {
+            return true;
+        }
+        // If it starts with a quote, stop after closing quote (common for chat models).
+        if (FullOut[0] == '"' && Last == '"')
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 ULocalTalkerInProcGenerateAsync* ULocalTalkerInProcGenerateAsync::GenerateStreamingInProc(
     UObject* WorldContextObject,
     const FLocalTalkerRuntimePaths& InPaths,
@@ -77,32 +120,51 @@ static bool LocalTalkerAbortCb(void* Data)
 
 static FString BuildPrompt(const FLocalTalkerCharacterConfig& C, const FString& UserPrompt)
 {
+    // TinyLlama-1.1B-Chat-v1.0 follows a Zephyr-style chat template on HuggingFace:
+    // <|system|>\n... </s>
+    // <|user|>\n... </s>
+    // <|assistant|>
+    //
+    // Matching the training template is the biggest lever to get stable formatting and spacing.
+
     const FString Directions = !C.Directions.IsEmpty() ? C.Directions : C.SystemPrompt;
     const FString Desc = !C.CharacterDescription.IsEmpty() ? C.CharacterDescription : C.Persona;
 
     FString SystemBlock;
     if (!Directions.IsEmpty())
     {
-        SystemBlock += TEXT("DIRECTIVES:\n") + Directions + TEXT("\n");
+        SystemBlock += Directions.TrimStartAndEnd();
     }
     if (!Desc.IsEmpty())
     {
-        SystemBlock += TEXT("\nCHARACTER DESCRIPTION:\n") + Desc + TEXT("\n");
+        if (!SystemBlock.IsEmpty()) SystemBlock += TEXT("\n\n");
+        SystemBlock += Desc.TrimStartAndEnd();
     }
-    SystemBlock +=
-        TEXT("\nOUTPUT CONTRACT:\n")
-        TEXT("- Output exactly ONE line of spoken dialogue only.\n")
-        TEXT("- No speaker labels, no names + colon, no \"User:\" / \"Assistant:\".\n")
-        TEXT("- No narration, no stage directions, no extra lines.\n")
-        TEXT("- Do not include newline characters.\n");
 
+    if (!SystemBlock.IsEmpty()) SystemBlock += TEXT("\n\n");
+    SystemBlock +=
+        TEXT("RULES:\n")
+        TEXT("- Reply as the character, in natural English.\n")
+        TEXT("- Output only the spoken dialogue. Do not include speaker labels (no \"User:\", \"Assistant:\", or \"Name:\").\n")
+        TEXT("- Do not output any markup or control tokens (no <|system|>, <|user|>, <|assistant|>, </s>, [INST], [/INST]).\n")
+        TEXT("- Use normal spacing between words and standard punctuation.\n")
+        TEXT("- Prefer a single paragraph; avoid lists unless explicitly asked.\n");
+
+    // Use the tokenizer's expected role tags and EOS separator.
+    // Note: llama.cpp uses </s> as the EOS token for Llama-family models.
     FString P;
-    P += TEXT("<s>[INST] <<SYS>>\n");
+    P.Reserve(SystemBlock.Len() + UserPrompt.Len() + 64);
+
+    P += TEXT("<|system|>\n");
     P += SystemBlock;
-    P += TEXT("\n<</SYS>>\n\n");
-    P += UserPrompt;
-    if (!P.EndsWith(TEXT("\n"))) P += TEXT("\n");
-    P += TEXT("[/INST]");
+    P += TEXT("</s>\n");
+
+    P += TEXT("<|user|>\n");
+    P += UserPrompt.TrimStartAndEnd();
+    P += TEXT("</s>\n");
+
+    // Generation prompt
+    P += TEXT("<|assistant|>\n");
     return P;
 }
 
@@ -342,40 +404,72 @@ void ULocalTalkerInProcGenerateAsync::Activate()
             }
 
             // Convert token -> UTF-8 piece
-            char Tmp[256];
-            int32_t Written = Api->llama_detokenize(Vocab, &Tok, 1, Tmp, (int32_t)sizeof(Tmp), true, false);
             FString Piece;
-            if (Written >= 0)
+            if (Api->llama_token_to_piece)
             {
-                if (Written < (int32_t)sizeof(Tmp))
+                // Preferred: decode exactly one token to its text piece.
+                // lstrip=0 keeps intended whitespace; special=false hides control tokens.
+                char Tmp[256];
+                int32_t Written = Api->llama_token_to_piece(Vocab, Tok, Tmp, (int32_t)sizeof(Tmp), 0, false);
+                if (Written >= 0)
                 {
-                    Tmp[Written] = '\0';
-                    Piece = UTF8_TO_TCHAR(Tmp);
-                }
-                else
-                {
-                    // Extremely rare, but avoid out-of-bounds.
-                    Piece = UTF8_TO_TCHAR(Tmp);
+                    TArray<char> Buf;
+                    if (Written >= (int32_t)sizeof(Tmp))
+                    {
+                        Buf.SetNumZeroed(Written + 1);
+                        const int32_t Written2 = Api->llama_token_to_piece(Vocab, Tok, Buf.GetData(), Written, 0, false);
+                        if (Written2 > 0)
+                        {
+                            Buf[Written2] = '\0';
+                            Piece = UTF8_TO_TCHAR(Buf.GetData());
+                        }
+                    }
+                    else
+                    {
+                        Tmp[Written] = '\0';
+                        Piece = UTF8_TO_TCHAR(Tmp);
+                    }
                 }
             }
             else
             {
-                const int32 Need = -Written;
-                TArray<char> Big;
-                Big.SetNumZeroed(Need + 1);
-                int32_t Written2 = Api->llama_detokenize(Vocab, &Tok, 1, Big.GetData(), Need, true, false);
-                if (Written2 > 0)
+                // Fallback: detokenize a single token.
+                // remove_special=true strips BOS/EOS; unparse_special=false prevents rendering control tokens.
+                char Tmp[256];
+                int32_t Written = Api->llama_detokenize(Vocab, &Tok, 1, Tmp, (int32_t)sizeof(Tmp), true, false);
+                if (Written >= 0)
                 {
-                    Big[Written2] = '\0';
-                    Piece = UTF8_TO_TCHAR(Big.GetData());
+                    if (Written < (int32_t)sizeof(Tmp))
+                    {
+                        Tmp[Written] = '\0';
+                        Piece = UTF8_TO_TCHAR(Tmp);
+                    }
+                }
+                else
+                {
+                    const int32 Need = -Written;
+                    TArray<char> Big;
+                    Big.SetNumZeroed(Need + 1);
+                    int32_t Written2 = Api->llama_detokenize(Vocab, &Tok, 1, Big.GetData(), Need, true, false);
+                    if (Written2 > 0)
+                    {
+                        Big[Written2] = '\0';
+                        Piece = UTF8_TO_TCHAR(Big.GetData());
+                    }
                 }
             }
 
             if (!Piece.IsEmpty())
             {
+                Piece = LocalTalkerNormalizeTokenPiece(MoveTemp(Piece));
                 FullOut += Piece;
                 DispatchToken(this, Piece);
                 DispatchDelta(this, Piece);
+
+                if (LocalTalkerShouldStopEarly(FullOut))
+                {
+                    break;
+                }
 
                 // Check stop sequence only if configured (empty by default now)
                 if (!C.Stop.IsEmpty() && FullOut.Contains(C.Stop))

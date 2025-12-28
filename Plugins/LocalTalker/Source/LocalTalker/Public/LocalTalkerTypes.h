@@ -43,7 +43,8 @@ struct FLocalTalkerCharacterConfig
     ELocalTalkerGpuBackend GpuBackend = ELocalTalkerGpuBackend::Auto;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
-    int32 MaxTokens = 192;
+    // Dialogue is intended to be short (one line). Keep this modest to reduce loops and long stalls.
+    int32 MaxTokens = 96;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
     float Temperature = 0.7f;

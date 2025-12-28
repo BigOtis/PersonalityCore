@@ -125,6 +125,8 @@ bool FLocalLlamaApi::Load(const FString& DllPath, FString& OutErr)
 
     Ok &= LoadFn(Lib, "llama_tokenize", llama_tokenize, OutErr);
     Ok &= LoadFn(Lib, "llama_detokenize", llama_detokenize, OutErr);
+    // Optional newer API - preferred for correct piece decoding (spaces) per token.
+    LoadOptionalFn(Lib, "llama_token_to_piece", llama_token_to_piece);
 
     Ok &= LoadFn(Lib, "llama_batch_init", llama_batch_init, OutErr);
     Ok &= LoadFn(Lib, "llama_batch_free", llama_batch_free, OutErr);
@@ -161,6 +163,9 @@ bool FLocalLlamaApi::Load(const FString& DllPath, FString& OutErr)
     Ok &= LoadFn(Lib, "llama_sampler_sample", llama_sampler_sample, OutErr);
     Ok &= LoadFn(Lib, "llama_sampler_accept", llama_sampler_accept, OutErr);
     Ok &= LoadFn(Lib, "llama_sampler_reset", llama_sampler_reset, OutErr);
+
+    // Optional: chat template helper (not used everywhere yet, but useful for future prompt formatting).
+    LoadOptionalFn(Lib, "llama_chat_apply_template", llama_chat_apply_template);
 
     if (!Ok)
     {

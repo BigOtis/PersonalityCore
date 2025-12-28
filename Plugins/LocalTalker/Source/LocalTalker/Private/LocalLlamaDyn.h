@@ -40,6 +40,9 @@ struct FLocalLlamaApi
 
     using llama_tokenize_fn = int32_t(*)(const llama_vocab*, const char*, int32_t, llama_token*, int32_t, bool, bool);
     using llama_detokenize_fn = int32_t(*)(const llama_vocab*, const llama_token*, int32_t, char*, int32_t, bool, bool);
+    using llama_token_to_piece_fn = int32_t(*)(const llama_vocab*, llama_token, char*, int32_t, int32_t, bool);
+
+    using llama_chat_apply_template_fn = int32_t(*)(const char*, const llama_chat_message*, size_t, bool, char*, int32_t);
 
     using llama_batch_init_fn = llama_batch(*)(int32_t, int32_t, int32_t);
     using llama_batch_free_fn = void(*)(llama_batch);
@@ -91,6 +94,9 @@ struct FLocalLlamaApi
 
     llama_tokenize_fn llama_tokenize = nullptr;
     llama_detokenize_fn llama_detokenize = nullptr;
+    llama_token_to_piece_fn llama_token_to_piece = nullptr;
+
+    llama_chat_apply_template_fn llama_chat_apply_template = nullptr;
 
     llama_batch_init_fn llama_batch_init = nullptr;
     llama_batch_free_fn llama_batch_free = nullptr;
