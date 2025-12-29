@@ -41,5 +41,22 @@ public:
 
     // Optional pacing: the Director won't auto-trigger until at least this much time has passed since the last message.
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Conversation", meta=(ClampMin="0.0"))
-    float MinSecondsBetweenAutoReplies = 0.0f;
+    float MinSecondsBetweenAutoReplies = 0.35f;
+
+    // Keep conversations alive indefinitely: if a context goes quiet, the Director will auto-trigger
+    // a new turn after MaxSilenceSeconds (even if the last message is old).
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Conversation")
+    bool bKeepConversationAlive = true;
+
+    // Maximum time (seconds) a conversation context is allowed to be silent before we auto-trigger a new line.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Conversation", meta=(ClampMin="0.0"))
+    float MaxSilenceSeconds = 5.0f;
+
+    // When keep-alive is enabled, optionally ignore the player-listener gate (useful for kiosk / background chatter scenes).
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Conversation")
+    bool bKeepAliveIgnoresPlayerListenerRequirement = true;
+
+    // How long a context must be inactive before we delete it. If keep-alive is enabled, contexts are not cleaned up.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Conversation", meta=(ClampMin="0.0"))
+    float ContextCleanupSeconds = 30.0f;
 };

@@ -43,20 +43,20 @@ static bool LocalTalkerShouldStopEarly(const FString& FullOut)
     // Deterministic "dialogue mode" stopping rules:
     // - Stop at first newline
     // - Stop after a reasonable one-line length
-    // - Stop after terminal punctuation once we have a minimal amount of content
+    // - Prefer to end on punctuation once the line is already fairly long (prevents rambling)
     if (FullOut.Contains(TEXT("\n")) || FullOut.Contains(TEXT("\r")))
     {
         return true;
     }
 
     // Hard cap: keep it a single line suitable for speech.
-    if (FullOut.Len() >= 220)
+    if (FullOut.Len() >= 480)
     {
         return true;
     }
 
-    // If we already have a chunk, stop when we reach a sentence end.
-    if (FullOut.Len() >= 40)
+    // If we already have a meaningful chunk, allow longer sentences, but still try to end cleanly.
+    if (FullOut.Len() >= 200)
     {
         const TCHAR Last = FullOut[FullOut.Len() - 1];
         if (Last == '.' || Last == '!' || Last == '?' )
@@ -118,14 +118,16 @@ static bool LocalTalkerAbortCb(void* Data)
     return Flag && (*Flag);
 }
 
-static FString BuildPrompt(const FLocalTalkerCharacterConfig& C, const FString& UserPrompt)
+static bool LocalTalkerModelLooksLikeLlama3(const FString& ModelPath)
 {
-    // TinyLlama-1.1B-Chat-v1.0 follows a Zephyr-style chat template on HuggingFace:
-    // <|system|>\n... </s>
-    // <|user|>\n... </s>
-    // <|assistant|>
-    //
-    // Matching the training template is the biggest lever to get stable formatting and spacing.
+    const FString Base = FPaths::GetBaseFilename(ModelPath).ToLower();
+    return Base.Contains(TEXT("llama-3")) || Base.Contains(TEXT("llama3"));
+}
+
+static FString BuildPrompt(const FLocalTalkerRuntimePaths& P, const FLocalTalkerCharacterConfig& C, const FString& UserPrompt)
+{
+    // Build a prompt matching the expected chat template for the model family we're running.
+    // The biggest lever to get stable formatting/spacing is matching the training template.
 
     const FString Directions = !C.Directions.IsEmpty() ? C.Directions : C.SystemPrompt;
     const FString Desc = !C.CharacterDescription.IsEmpty() ? C.CharacterDescription : C.Persona;
@@ -144,28 +146,46 @@ static FString BuildPrompt(const FLocalTalkerCharacterConfig& C, const FString& 
     if (!SystemBlock.IsEmpty()) SystemBlock += TEXT("\n\n");
     SystemBlock +=
         TEXT("RULES:\n")
-        TEXT("- Reply as the character, in natural English.\n")
-        TEXT("- Output only the spoken dialogue. Do not include speaker labels (no \"User:\", \"Assistant:\", or \"Name:\").\n")
+        TEXT("- Stay strictly in character at all times.\n")
+        TEXT("- Keep continuity with the conversation so far; do not change subjects abruptly.\n")
+        TEXT("- Always move the conversation forward: add a new detail, opinion, or observation.\n")
+        TEXT("- Do not echo or translate the last line verbatim.\n")
+        TEXT("- Output only the spoken dialogue. Do not include speaker labels (no \"User:\", \"Assistant:\", \"Name:\", or any prefix like \"Some Role:\").\n")
         TEXT("- Do not output any markup or control tokens (no <|system|>, <|user|>, <|assistant|>, </s>, [INST], [/INST]).\n")
         TEXT("- Use normal spacing between words and standard punctuation.\n")
-        TEXT("- Prefer a single paragraph; avoid lists unless explicitly asked.\n");
+        TEXT("- Speak in 2–4 complete sentences unless the user asks for something shorter.\n")
+        TEXT("- Avoid meta commentary (no \"as an AI\", no narration like \"he says\", no stage directions).\n");
 
-    // Use the tokenizer's expected role tags and EOS separator.
-    // Note: llama.cpp uses </s> as the EOS token for Llama-family models.
-    FString P;
-    P.Reserve(SystemBlock.Len() + UserPrompt.Len() + 64);
+    if (LocalTalkerModelLooksLikeLlama3(P.LlamaModelPath))
+    {
+        FString Prompt;
+        Prompt.Reserve(SystemBlock.Len() + UserPrompt.Len() + 128);
+        Prompt += TEXT("<|begin_of_text|>");
+        Prompt += TEXT("<|start_header_id|>system<|end_header_id|>\n");
+        Prompt += SystemBlock;
+        Prompt += TEXT("\n<|eot_id|>\n");
+        Prompt += TEXT("<|start_header_id|>user<|end_header_id|>\n");
+        Prompt += UserPrompt.TrimStartAndEnd();
+        Prompt += TEXT("\n<|eot_id|>\n");
+        Prompt += TEXT("<|start_header_id|>assistant<|end_header_id|>\n");
+        return Prompt;
+    }
 
-    P += TEXT("<|system|>\n");
-    P += SystemBlock;
-    P += TEXT("</s>\n");
+    // Default fallback: Zephyr-style tags (works well for TinyLlama/Zephyr family).
+    FString Prompt;
+    Prompt.Reserve(SystemBlock.Len() + UserPrompt.Len() + 64);
 
-    P += TEXT("<|user|>\n");
-    P += UserPrompt.TrimStartAndEnd();
-    P += TEXT("</s>\n");
+    Prompt += TEXT("<|system|>\n");
+    Prompt += SystemBlock;
+    Prompt += TEXT("</s>\n");
+
+    Prompt += TEXT("<|user|>\n");
+    Prompt += UserPrompt.TrimStartAndEnd();
+    Prompt += TEXT("</s>\n");
 
     // Generation prompt
-    P += TEXT("<|assistant|>\n");
-    return P;
+    Prompt += TEXT("<|assistant|>\n");
+    return Prompt;
 }
 
 void ULocalTalkerInProcGenerateAsync::DispatchError(const FString& Msg)
@@ -211,7 +231,7 @@ void ULocalTalkerInProcGenerateAsync::Activate()
 {
     const FLocalTalkerRuntimePaths P = Paths;
     const FLocalTalkerCharacterConfig C = Character;
-    const FString Prompt = bPromptIsFull ? PromptText : BuildPrompt(C, UserPrompt);
+    const FString Prompt = bPromptIsFull ? PromptText : BuildPrompt(P, C, UserPrompt);
 
     const double ActivateStart = FPlatformTime::Seconds();
     if (CVarLocalTalkerTraceConversation_InProc.GetValueOnAnyThread() != 0)
@@ -370,9 +390,48 @@ void ULocalTalkerInProcGenerateAsync::Activate()
             return;
         }
 
-        // Basic fast sampler defaults; can be made configurable.
-        Api->llama_sampler_chain_add(Sampler, Api->llama_sampler_init_top_k(40));
-        Api->llama_sampler_chain_add(Sampler, Api->llama_sampler_init_top_p(0.95f, 1));
+        // Sampler chain (configurable best-practice defaults).
+        const int32 TopK = FMath::Max(0, C.TopK);
+        const float TopP = FMath::Clamp(C.TopP, 0.0f, 1.0f);
+        if (TopK > 0)
+        {
+            Api->llama_sampler_chain_add(Sampler, Api->llama_sampler_init_top_k(TopK));
+        }
+        if (TopP > 0.0f && TopP < 1.0f)
+        {
+            Api->llama_sampler_chain_add(Sampler, Api->llama_sampler_init_top_p(TopP, 1));
+        }
+
+        // Optional samplers if exported by this llama.cpp build.
+        if (Api->llama_sampler_init_min_p)
+        {
+            const float MinP = FMath::Clamp(C.MinP, 0.0f, 1.0f);
+            if (MinP > 0.0f)
+            {
+                Api->llama_sampler_chain_add(Sampler, Api->llama_sampler_init_min_p(MinP, 1));
+            }
+        }
+        if (Api->llama_sampler_init_typical)
+        {
+            const float TypicalP = FMath::Clamp(C.TypicalP, 0.0f, 1.0f);
+            if (TypicalP > 0.0f && TypicalP < 1.0f)
+            {
+                Api->llama_sampler_chain_add(Sampler, Api->llama_sampler_init_typical(TypicalP, 1));
+            }
+        }
+
+        // Repetition penalties (optional) — helps prevent echo loops like "Hola buddy" ping-pong.
+        if (Api->llama_sampler_init_penalties)
+        {
+            const int32 LastN = FMath::Max(0, C.RepeatLastN);
+            const float Repeat = FMath::Max(1.0f, C.RepeatPenalty);
+            const float Freq = FMath::Max(0.0f, C.FrequencyPenalty);
+            const float Pres = FMath::Max(0.0f, C.PresencePenalty);
+            if (LastN > 0 && (Repeat > 1.0f || Freq > 0.0f || Pres > 0.0f))
+            {
+                Api->llama_sampler_chain_add(Sampler, Api->llama_sampler_init_penalties(LastN, Repeat, Freq, Pres));
+            }
+        }
 
         const float Temp = FMath::Max(0.0f, C.Temperature);
         if (Temp > 0.0f)

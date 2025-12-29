@@ -44,10 +44,37 @@ struct FLocalTalkerCharacterConfig
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
     // Dialogue is intended to be short (one line). Keep this modest to reduce loops and long stalls.
-    int32 MaxTokens = 96;
+    int32 MaxTokens = 192;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
-    float Temperature = 0.7f;
+    float Temperature = 0.65f;
+
+    // --- Sampling controls (best-practice defaults for chatty dialogue without echo loops) ---
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0"))
+    int32 TopK = 40;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0.0", ClampMax="1.0"))
+    float TopP = 0.90f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0.0", ClampMax="1.0"))
+    float MinP = 0.05f; // 0 disables min-p
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0.0", ClampMax="1.0"))
+    float TypicalP = 1.0f; // 1 disables typical-p
+
+    // Repetition / presence / frequency penalties (llama.cpp penalties sampler).
+    // NOTE: penalties are applied after top-k/top-p for performance.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0"))
+    int32 RepeatLastN = 128;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="1.0"))
+    float RepeatPenalty = 1.12f; // 1.0 disables
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0.0"))
+    float FrequencyPenalty = 0.10f; // 0 disables
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0.0"))
+    float PresencePenalty = 0.10f; // 0 disables
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
     int32 Seed = 0;

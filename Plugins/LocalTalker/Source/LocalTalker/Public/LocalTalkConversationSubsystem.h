@@ -46,6 +46,10 @@ struct FLocalConversationContext
     // Used to cap NPC-to-NPC auto-response loops.
     UPROPERTY()
     int32 ConsecutiveNpcTurns = 0;
+
+    // Used for keep-alive auto-chatter to avoid re-enqueueing every tick.
+    UPROPERTY()
+    float LastAutoEnqueueTime = 0.0f;
 };
 
 /**
@@ -79,6 +83,12 @@ public:
     /** Gets the history for the context this agent belongs to. */
     TArray<FLocalTalkMessage> GetContextHistory(ULocalCharacterComponent* Agent);
 
+    /** Gets the current participants for the context this agent belongs to. */
+    TArray<ULocalCharacterComponent*> GetContextParticipants(ULocalCharacterComponent* Agent);
+
+    /** Clears the history for the context this agent belongs to. */
+    void ClearContextHistory(ULocalCharacterComponent* Agent);
+
     /** Forces everyone near a location to stop talking. */
     void InterruptProximity(const FVector& Location, float Radius);
 
@@ -96,11 +106,15 @@ private:
     {
         TWeakObjectPtr<ULocalCharacterComponent> Talker;
         FString Prompt;
+        double EarliestGrantWorldSeconds = 0.0;
     };
     TArray<FQueuedTurn> ManualQueue;
 
     void UpdateContexts();
     void ProcessTurns();
+    void MaintainKeepAlive();
+
+    void EnqueueTurn(ULocalCharacterComponent* Talker, const FString& Prompt, double EarliestGrantWorldSeconds);
     
     FLocalConversationContext* FindOrCreateContext(ULocalCharacterComponent* Agent);
     void AddMessageToContext(FLocalConversationContext& Context, const FString& Speaker, const FString& Text, bool bFromUser);

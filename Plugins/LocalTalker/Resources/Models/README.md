@@ -4,7 +4,7 @@ This folder is where the Fab distribution of **LocalTalker** will ship one or mo
 
 The runtime will auto-default to:
 
-- `Resources/Models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf`
+- `Resources/Models/Llama-3.2-3B-Q4_K_M.gguf`
 
 If you change the bundled model name(s), update the defaults in:
 

@@ -42,7 +42,7 @@ namespace LocalTalkerTestHelpers
             }
             if (Paths.LlamaModelPath.IsEmpty())
             {
-                Paths.LlamaModelPath = FPaths::Combine(BaseDir, TEXT("Resources/Models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"));
+                Paths.LlamaModelPath = FPaths::Combine(BaseDir, TEXT("Resources/Models/Llama-3.2-3B-Q4_K_M.gguf"));
             }
             if (Paths.PiperExePath.IsEmpty())
             {
@@ -129,7 +129,7 @@ bool FLocalTalkerRequiredFilesTest::RunTest(const FString& Parameters)
         TestTrue(TEXT("LLM model (.gguf) exists"), bExists);
         if (!bExists)
         {
-            AddError(FString::Printf(TEXT("MISSING: LLM model at %s. Download from: https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"), *Paths.LlamaModelPath));
+            AddError(FString::Printf(TEXT("MISSING: LLM model at %s. Download from: https://huggingface.co/tensorblock/Llama-3.2-3B-GGUF/resolve/main/Llama-3.2-3B-Q4_K_M.gguf"), *Paths.LlamaModelPath));
             bAllFilesExist = false;
         }
     }
@@ -239,7 +239,7 @@ bool FLocalTalkerModelValidationTest::RunTest(const FString& Parameters)
     }
 
     // Check model file size
-    // TinyLlama Q4_K_M is ~637 MB, so we require at least 100 MB for any valid LLM model
+    // Llama 3.2 3B Q4_K_M is ~2 GB, so we require at least 100 MB for any valid LLM model
     // Files under this threshold are likely corrupt, incomplete downloads, or HTML error pages
     const int64 FileSize = FPlatformFileManager::Get().GetPlatformFile().FileSize(*Paths.LlamaModelPath);
     const int64 MinExpectedSize = 100 * 1024 * 1024; // 100 MB minimum for any real LLM model
@@ -250,7 +250,7 @@ bool FLocalTalkerModelValidationTest::RunTest(const FString& Parameters)
     if (FileSize <= MinExpectedSize)
     {
         AddError(FString::Printf(TEXT("Model file is too small (%.1f MB). Expected at least 100 MB. File may be corrupt or incomplete download: %s"), SizeMB, *Paths.LlamaModelPath));
-        AddError(TEXT("Download the correct model from: https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"));
+        AddError(TEXT("Download the correct model from: https://huggingface.co/tensorblock/Llama-3.2-3B-GGUF/resolve/main/Llama-3.2-3B-Q4_K_M.gguf"));
         return false;
     }
 

@@ -69,6 +69,9 @@ struct FLocalLlamaApi
     using llama_sampler_init_temp_fn = llama_sampler*(*)(float);
     using llama_sampler_init_top_k_fn = llama_sampler*(*)(int);
     using llama_sampler_init_top_p_fn = llama_sampler*(*)(float, int);
+    using llama_sampler_init_min_p_fn = llama_sampler*(*)(float, size_t);
+    using llama_sampler_init_typical_fn = llama_sampler*(*)(float, size_t);
+    using llama_sampler_init_penalties_fn = llama_sampler*(*)(int32_t, float, float, float);
     using llama_sampler_init_dist_fn = llama_sampler*(*)(uint32_t);
     using llama_sampler_init_greedy_fn = llama_sampler*(*)(void);
     using llama_sampler_chain_add_fn = void(*)(llama_sampler*, llama_sampler*);
@@ -124,6 +127,9 @@ struct FLocalLlamaApi
     llama_sampler_init_temp_fn llama_sampler_init_temp = nullptr;
     llama_sampler_init_top_k_fn llama_sampler_init_top_k = nullptr;
     llama_sampler_init_top_p_fn llama_sampler_init_top_p = nullptr;
+    llama_sampler_init_min_p_fn llama_sampler_init_min_p = nullptr;
+    llama_sampler_init_typical_fn llama_sampler_init_typical = nullptr;
+    llama_sampler_init_penalties_fn llama_sampler_init_penalties = nullptr;
     llama_sampler_init_dist_fn llama_sampler_init_dist = nullptr;
     llama_sampler_init_greedy_fn llama_sampler_init_greedy = nullptr;
     llama_sampler_chain_add_fn llama_sampler_chain_add = nullptr;

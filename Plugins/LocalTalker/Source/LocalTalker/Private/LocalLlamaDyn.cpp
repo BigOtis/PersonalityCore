@@ -157,6 +157,10 @@ bool FLocalLlamaApi::Load(const FString& DllPath, FString& OutErr)
     Ok &= LoadFn(Lib, "llama_sampler_init_temp", llama_sampler_init_temp, OutErr);
     Ok &= LoadFn(Lib, "llama_sampler_init_top_k", llama_sampler_init_top_k, OutErr);
     Ok &= LoadFn(Lib, "llama_sampler_init_top_p", llama_sampler_init_top_p, OutErr);
+    // Optional samplers (depending on llama.cpp version/build)
+    LoadOptionalFn(Lib, "llama_sampler_init_min_p", llama_sampler_init_min_p);
+    LoadOptionalFn(Lib, "llama_sampler_init_typical", llama_sampler_init_typical);
+    LoadOptionalFn(Lib, "llama_sampler_init_penalties", llama_sampler_init_penalties);
     Ok &= LoadFn(Lib, "llama_sampler_init_dist", llama_sampler_init_dist, OutErr);
     Ok &= LoadFn(Lib, "llama_sampler_init_greedy", llama_sampler_init_greedy, OutErr);
     Ok &= LoadFn(Lib, "llama_sampler_chain_add", llama_sampler_chain_add, OutErr);

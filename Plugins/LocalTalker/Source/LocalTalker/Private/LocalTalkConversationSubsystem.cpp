@@ -57,6 +57,7 @@ void ULocalTalkConversationSubsystem::Tick(float DeltaTime)
     
     UpdateContexts();
     ProcessTurns();
+    MaintainKeepAlive();
 }
 
 void ULocalTalkConversationSubsystem::RegisterTalker(ULocalCharacterComponent* Talker)
@@ -84,6 +85,9 @@ void ULocalTalkConversationSubsystem::RequestTurn(ULocalCharacterComponent* Talk
 {
     if (!Talker || Prompt.IsEmpty()) return;
 
+    const UWorld* W = GetWorld();
+    const double Now = W ? (double)W->GetTimeSeconds() : 0.0;
+
     // If it's a user prompt (not RAW and not an instruction), add to history
     if (!Prompt.StartsWith(TEXT("RAW:")) && !Prompt.StartsWith(TEXT("Respond to ")))
     {
@@ -93,17 +97,30 @@ void ULocalTalkConversationSubsystem::RequestTurn(ULocalCharacterComponent* Talk
         }
     }
 
+    EnqueueTurn(Talker, Prompt, Now);
+}
+
+void ULocalTalkConversationSubsystem::EnqueueTurn(ULocalCharacterComponent* Talker, const FString& Prompt, double EarliestGrantWorldSeconds)
+{
+    if (!Talker || Prompt.IsEmpty()) return;
+
     // Check if they are already in the queue - if so, update their prompt
     for (FQueuedTurn& Q : ManualQueue)
     {
         if (Q.Talker.Get() == Talker)
         {
             Q.Prompt = Prompt;
+            // Preserve the later of the existing earliest time and the new one.
+            Q.EarliestGrantWorldSeconds = FMath::Max(Q.EarliestGrantWorldSeconds, EarliestGrantWorldSeconds);
             return;
         }
     }
 
-    ManualQueue.Add({ Talker, Prompt });
+    FQueuedTurn NewTurn;
+    NewTurn.Talker = Talker;
+    NewTurn.Prompt = Prompt;
+    NewTurn.EarliestGrantWorldSeconds = EarliestGrantWorldSeconds;
+    ManualQueue.Add(MoveTemp(NewTurn));
     
     UE_LOG(LogLocalTalker, Log, TEXT("[Director] '%s' requested turn (Manual Queue length: %d)"), 
         *Talker->GetSpeakerNameResolved(), ManualQueue.Num());
@@ -161,6 +178,32 @@ TArray<FLocalTalkMessage> ULocalTalkConversationSubsystem::GetContextHistory(ULo
     return TArray<FLocalTalkMessage>();
 }
 
+TArray<ULocalCharacterComponent*> ULocalTalkConversationSubsystem::GetContextParticipants(ULocalCharacterComponent* Agent)
+{
+    TArray<ULocalCharacterComponent*> Out;
+    if (FLocalConversationContext* Context = FindOrCreateContext(Agent))
+    {
+        for (const TWeakObjectPtr<ULocalCharacterComponent>& Weak : Context->Participants)
+        {
+            if (ULocalCharacterComponent* P = Weak.Get())
+            {
+                Out.Add(P);
+            }
+        }
+    }
+    return Out;
+}
+
+void ULocalTalkConversationSubsystem::ClearContextHistory(ULocalCharacterComponent* Agent)
+{
+    if (FLocalConversationContext* Context = FindOrCreateContext(Agent))
+    {
+        Context->History.Reset();
+        Context->ConsecutiveNpcTurns = 0;
+        Context->LastInteractionTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+    }
+}
+
 void ULocalTalkConversationSubsystem::UpdateContexts()
 {
     UWorld* W = GetWorld();
@@ -168,9 +211,15 @@ void ULocalTalkConversationSubsystem::UpdateContexts()
     float CurrentTime = W->GetTimeSeconds();
 
     // 1. Cleanup old contexts (inactive for > 30s)
-    ActiveContexts.RemoveAll([CurrentTime](const FLocalConversationContext& C) {
-        return (CurrentTime - C.LastInteractionTime) > 30.0f;
-    });
+    const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>();
+    const bool bKeepAlive = S ? S->bKeepConversationAlive : false;
+    const float CleanupSeconds = S ? S->ContextCleanupSeconds : 30.0f;
+    if (!bKeepAlive)
+    {
+        ActiveContexts.RemoveAll([CurrentTime, CleanupSeconds](const FLocalConversationContext& C) {
+            return (CleanupSeconds > 0.0f) && ((CurrentTime - C.LastInteractionTime) > CleanupSeconds);
+        });
+    }
 
     // 2. Refresh participants for each context based on proximity to context center
     for (auto& Context : ActiveContexts)
@@ -187,6 +236,110 @@ void ULocalTalkConversationSubsystem::UpdateContexts()
                 Context.Participants.Add(Agent);
             }
         }
+    }
+}
+
+void ULocalTalkConversationSubsystem::MaintainKeepAlive()
+{
+    UWorld* W = GetWorld();
+    if (!W) return;
+
+    const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>();
+    if (!S || !S->bKeepConversationAlive) return;
+
+    const float MaxSilence = FMath::Max(0.0f, S->MaxSilenceSeconds);
+    const float MinDelay = FMath::Max(0.0f, S->MinSecondsBetweenAutoReplies);
+    const bool bAllowNpcToNpc = S->bAllowNpcToNpcAuto;
+    const bool bRequireListener = S->bRequirePlayerListenerForAuto;
+    const bool bIgnoreListener = S->bKeepAliveIgnoresPlayerListenerRequirement;
+
+    if (!bAllowNpcToNpc) return;
+
+    const float Now = W->GetTimeSeconds();
+
+    for (FLocalConversationContext& Context : ActiveContexts)
+    {
+        if (Context.Participants.Num() == 0) continue;
+
+        // Don't enqueue if any participant is busy.
+        bool bAnyBusy = false;
+        for (const auto& Weak : Context.Participants)
+        {
+            if (ULocalCharacterComponent* P = Weak.Get())
+            {
+                if (P->IsBusy())
+                {
+                    bAnyBusy = true;
+                    break;
+                }
+            }
+        }
+        if (bAnyBusy) continue;
+
+        // Respect listener gating unless explicitly ignored for keep-alive.
+        if (bRequireListener && !bIgnoreListener && !LocalTalkerIsAnyPlayerPawnInHearingRange(W, Context))
+        {
+            continue;
+        }
+
+        const float Silence = Now - Context.LastInteractionTime;
+        if (Silence < MaxSilence) continue;
+
+        // Avoid enqueue spam: only enqueue once per silence window (plus a small buffer).
+        if (Context.LastAutoEnqueueTime > 0.0f && (Now - Context.LastAutoEnqueueTime) < FMath::Max(0.2f, MaxSilence * 0.5f))
+        {
+            continue;
+        }
+
+        // If any queued turn already exists for someone in this context, let it play out.
+        bool bAlreadyQueued = false;
+        for (const FQueuedTurn& Q : ManualQueue)
+        {
+            ULocalCharacterComponent* QT = Q.Talker.Get();
+            if (!QT) continue;
+            for (const auto& Weak : Context.Participants)
+            {
+                if (Weak.Get() == QT)
+                {
+                    bAlreadyQueued = true;
+                    break;
+                }
+            }
+            if (bAlreadyQueued) break;
+        }
+        if (bAlreadyQueued) continue;
+
+        // Pick a speaker (simple: first valid participant).
+        ULocalCharacterComponent* Candidate = nullptr;
+        for (const auto& Weak : Context.Participants)
+        {
+            if (ULocalCharacterComponent* P = Weak.Get())
+            {
+                Candidate = P;
+                break;
+            }
+        }
+        if (!Candidate) continue;
+
+        FString Prompt;
+        if (Context.History.Num() > 0)
+        {
+            const FLocalTalkMessage& LastMsg = Context.History.Last();
+            Prompt = FString::Printf(
+                TEXT("Director instruction: Keep the conversation alive. Respond in-character to %s's last line, add a NEW concrete detail or viewpoint, avoid repeating their wording, and end with a fresh question. Last line: %s"),
+                *LastMsg.SpeakerName,
+                *LastMsg.Content
+            );
+        }
+        else
+        {
+            Prompt = TEXT("Director instruction: Start a natural in-character conversation with the nearby person. Say something specific and end with a question.");
+        }
+
+        // Enforce pacing via the queued turn's earliest-grant time.
+        const double Earliest = (double)Now + (double)MinDelay;
+        EnqueueTurn(Candidate, Prompt, Earliest);
+        Context.LastAutoEnqueueTime = Now;
     }
 }
 
@@ -254,6 +407,8 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
     const int32 MaxNpcTurns = S ? S->MaxConsecutiveNpcTurns : 0;
     const float MinDelay = S ? S->MinSecondsBetweenAutoReplies : 0.0f;
     const bool bRequireListener = S ? S->bRequirePlayerListenerForAuto : false;
+    const bool bKeepAlive = S ? S->bKeepConversationAlive : false;
+    const bool bIgnoreListener = S ? S->bKeepAliveIgnoresPlayerListenerRequirement : false;
 
     // Default rule: auto-respond to USER messages. Optionally allow NPC-to-NPC within a capped streak.
     if (!LastMsg.bFromUser)
@@ -262,7 +417,7 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
         {
             return;
         }
-        if (bRequireListener && !LocalTalkerIsAnyPlayerPawnInHearingRange(GetWorld(), Context))
+        if (bRequireListener && !(bKeepAlive && bIgnoreListener) && !LocalTalkerIsAnyPlayerPawnInHearingRange(GetWorld(), Context))
         {
             return;
         }
@@ -281,11 +436,18 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
         {
             // Only respond if the last message was within a reasonable timeframe
             const float TimeSinceLast = GetWorld()->GetTimeSeconds() - Context.LastInteractionTime;
-            if (TimeSinceLast >= MinDelay && TimeSinceLast < 5.0f)
+            if (TimeSinceLast < 5.0f)
             {
-                FString Prompt = FString::Printf(TEXT("Respond to %s: %s"), *LastMsg.SpeakerName, *LastMsg.Content);
+                const FString Prompt = FString::Printf(
+                    TEXT("Director instruction: Respond in-character to %s's last line. Add a NEW detail or viewpoint, do not echo their exact wording, and end with a natural follow-up question. Last line: %s"),
+                    *LastMsg.SpeakerName,
+                    *LastMsg.Content
+                );
                 UE_LOG(LogLocalTalker, Log, TEXT("[Director] -> TRIGGERING RESPONSE from '%s'"), *Candidate->GetSpeakerNameResolved());
-                Candidate->InternalGrantTurn(Prompt);
+                // Queue as a normal turn, but delay granting so conversations don't machine-gun between NPCs.
+                const double Now = (double)GetWorld()->GetTimeSeconds();
+                const double Earliest = Now + (double)FMath::Max(0.0f, MinDelay);
+                EnqueueTurn(Candidate, Prompt, Earliest);
                 return;
             }
         }
@@ -294,6 +456,9 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
 
 void ULocalTalkConversationSubsystem::ProcessTurns()
 {
+    const UWorld* W = GetWorld();
+    const double Now = W ? (double)W->GetTimeSeconds() : 0.0;
+
     // Handle manual requests (e.g. Player interaction or scripted events)
     for (int32 i = 0; i < ManualQueue.Num(); i++)
     {
@@ -302,6 +467,11 @@ void ULocalTalkConversationSubsystem::ProcessTurns()
         {
             ManualQueue.RemoveAt(i);
             i--;
+            continue;
+        }
+
+        if (Now < ManualQueue[i].EarliestGrantWorldSeconds)
+        {
             continue;
         }
 

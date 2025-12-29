@@ -5,131 +5,61 @@
 #include "LocalTalkerWav.h"
 #include "LocalTalkerLog.h"
 #include "LocalTalkConversationSubsystem.h"
+
 #include "Async/Async.h"
 #include "Engine/Engine.h"
 #include "SubtitleManager.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
-#include "Misc/Guid.h"
-#include "HAL/IConsoleManager.h"
+#include "Misc/PathViews.h"
 #include "HAL/PlatformFileManager.h"
-#include "HAL/FileManager.h"
+#include "HAL/PlatformTime.h"
 
-static TAutoConsoleVariable<int32> CVarLocalTalkerTraceConversation(
-    TEXT("LocalTalker.TraceConversation"),
-    0,
-    TEXT("Enable high-signal conversation tracing logs.\n0=off, 1=on"),
-    ECVF_Default
-);
-
-static bool TraceEnabled(const ULocalCharacterComponent* C)
+static FString QuoteArg3(const FString& S)
 {
-    return (CVarLocalTalkerTraceConversation.GetValueOnAnyThread() != 0) || (C && C->bTraceConversation);
+    FString T = S;
+    T.ReplaceInline(TEXT("\""), TEXT("\\\""));
+    return FString::Printf(TEXT("\"%s\""), *T);
 }
 
-static FString LocalTalkerOneLineTrunc(const FString& In, int32 MaxChars)
+static bool IsSentenceTerminator(TCHAR C)
 {
-    FString S = In.Replace(TEXT("\r"), TEXT(" ")).Replace(TEXT("\n"), TEXT(" ")).TrimStartAndEnd();
-    return (MaxChars > 0 && S.Len() > MaxChars) ? S.Left(MaxChars) + TEXT("...") : S;
+    // Avoid treating '\n' as a terminator: it causes JSON-like outputs to get split into stray `"}"` chunks.
+    return C == TEXT('.') || C == TEXT('!') || C == TEXT('?');
 }
 
-// Best-effort cleanup so model output becomes "dialogue", not chat transcripts.
-// - Collapses whitespace/newlines
-// - Removes leading role/speaker prefixes ("Assistant:", "User:", "Milo:", etc.)
-static FString LocalTalkerSanitizeDialogueLine(const FString& In)
+static FString TrimSentence(const FString& In)
 {
-    // Normalize line breaks -> spaces
     FString S = In;
-    S.ReplaceInline(TEXT("\r"), TEXT(" "));
-    S.ReplaceInline(TEXT("\n"), TEXT(" "));
-
-    // Collapse whitespace runs
-    FString Out;
-    Out.Reserve(S.Len());
-    bool bPrevWs = false;
-    for (int32 i = 0; i < S.Len(); i++)
-    {
-        const TCHAR C = S[i];
-        const bool bWs = FChar::IsWhitespace(C) != 0;
-        if (bWs)
-        {
-            if (!bPrevWs)
-            {
-                Out.AppendChar(TEXT(' '));
-                bPrevWs = true;
-            }
-            continue;
-        }
-        bPrevWs = false;
-        Out.AppendChar(C);
-    }
-    Out.TrimStartAndEndInline();
-
-    // Strip known prefixes repeatedly (models sometimes emit "Assistant: Assistant: ...").
-    // Keep this small + deterministic; if the prompt/template is correct, this should rarely trigger.
-    auto StripPrefix = [&Out](const TCHAR* Prefix) -> bool
-    {
-        const int32 PrefixLen = FCString::Strlen(Prefix);
-        if (Out.Len() >= PrefixLen && Out.Left(PrefixLen).Equals(Prefix, ESearchCase::IgnoreCase))
-        {
-            Out = Out.Mid(PrefixLen);
-            Out.TrimStartAndEndInline();
-            return true;
-        }
-        return false;
-    };
-
-    bool bStrippedAny = false;
-    for (;;)
-    {
-        bool bStrippedThisLoop = false;
-
-        bStrippedThisLoop |= StripPrefix(TEXT("Assistant:"));
-        bStrippedThisLoop |= StripPrefix(TEXT("User:"));
-        bStrippedThisLoop |= StripPrefix(TEXT("System:"));
-        bStrippedThisLoop |= StripPrefix(TEXT("NPC:"));
-        bStrippedThisLoop |= StripPrefix(TEXT("<|assistant|>"));
-        bStrippedThisLoop |= StripPrefix(TEXT("<|user|>"));
-        bStrippedThisLoop |= StripPrefix(TEXT("<|system|>"));
-        bStrippedThisLoop |= StripPrefix(TEXT("</s>"));
-        bStrippedThisLoop |= StripPrefix(TEXT("[INST]"));
-        bStrippedThisLoop |= StripPrefix(TEXT("[/INST]"));
-
-        // Generic "Name:" prefix (single token up to 24 chars, no spaces).
-        int32 ColonIdx = Out.Find(TEXT(":"), ESearchCase::IgnoreCase, ESearchDir::FromStart);
-        if (ColonIdx > 0 && ColonIdx <= 24)
-        {
-            const FString Left = Out.Left(ColonIdx);
-            if (!Left.Contains(TEXT(" ")) && !Left.Contains(TEXT("\t")))
-            {
-                Out = Out.Mid(ColonIdx + 1);
-                Out.TrimStartAndEndInline();
-                bStrippedThisLoop = true;
-            }
-        }
-
-        bStrippedAny |= bStrippedThisLoop;
-        if (!bStrippedThisLoop) break;
-    }
-
-    // If we stripped a prefix, do one more whitespace collapse (prefix removal can expose double spaces)
-    if (bStrippedAny)
-    {
-        Out.ReplaceInline(TEXT("  "), TEXT(" "));
-        Out.TrimStartAndEndInline();
-    }
-
-    return Out;
+    S.ReplaceInline(TEXT("\r"), TEXT(""));
+    S.TrimStartAndEndInline();
+    return S;
 }
 
 ULocalCharacterComponent::ULocalCharacterComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
+
+    // Sensible prompt defaults (editable on the component).
+    Directions =
+        TEXT("You are a helpful game character in Unreal Engine.\n")
+        TEXT("Follow the player's instructions carefully.\n")
+        TEXT("If you are unsure, ask a short clarifying question.\n")
+        TEXT("Keep responses concise and actionable.\n")
+        TEXT("Do not mention being an AI or a language model.\n");
+
+    Desc = TEXT("");
+
+    // Prefer real UE subtitles instead of debug prints.
+    bUseUESubtitles = true;
+    bShowOnScreenSubtitles = false;
 }
 
 void ULocalCharacterComponent::BeginPlay()
 {
     Super::BeginPlay();
+    EnsureAudio();
+
     if (UWorld* W = GetWorld())
     {
         if (auto* Sub = W->GetSubsystem<ULocalTalkConversationSubsystem>())
@@ -137,11 +67,20 @@ void ULocalCharacterComponent::BeginPlay()
             Sub->RegisterTalker(this);
         }
     }
+
+    // Quick visibility into what the component is using at runtime.
+    const FLocalTalkerRuntimePaths Paths = ResolvePaths();
+    UE_LOG(LogLocalTalker, Log, TEXT("[%s] LocalTalker paths: LlamaLib='%s' Model='%s' PiperExe='%s' Voice='%s' WorkDir='%s'"),
+        *GetSpeakerNameResolved(),
+        *Paths.LlamaLibPath, *Paths.LlamaModelPath, *Paths.PiperExePath, *Paths.PiperVoiceModelPath, *Paths.WorkingDir
+    );
 }
 
 void ULocalCharacterComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+    Interrupt();
     StopTTSWorker();
+
     if (UWorld* W = GetWorld())
     {
         if (auto* Sub = W->GetSubsystem<ULocalTalkConversationSubsystem>())
@@ -149,6 +88,7 @@ void ULocalCharacterComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
             Sub->UnregisterTalker(this);
         }
     }
+
     Super::EndPlay(EndPlayReason);
 }
 
@@ -156,173 +96,30 @@ void ULocalCharacterComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-    ExtractAndEnqueueSentences(false);
+    if (bInterrupted) return;
+
+    const double Now = FPlatformTime::Seconds();
+    const bool bTimeout = (LLMTextBuffer.Len() > 0) && ((Now - LastTextAppendSeconds) >= FlushSeconds);
+
+    ExtractAndEnqueueSentences(bTimeout);
+
+    if (bLLMFinished && LLMTextBuffer.Len() > 0)
+    {
+        ExtractAndEnqueueSentences(true);
+    }
+
     PumpAudioToProcedural();
 
-    // If the procedural audio is "stuck playing" after the last chunk, force-stop it after a short tail.
-    // This prevents long turn handoff delays between speakers.
-    if (bIsSpeakingInternal && bLLMFinished && bAudioQueueDrained && PendingSentenceCount.GetValue() == 0 && PendingAudioChunkCount.GetValue() == 0)
-    {
-        if (AudioComp && AudioComp->IsPlaying())
-        {
-            const uint64 Enq = LastAudioEnqueueCycles.Load();
-            if (Enq != 0)
-            {
-                const double Since = FPlatformTime::ToSeconds64(FPlatformTime::Cycles64() - Enq);
-                if (Since >= (double)TurnReleaseAudioTailSeconds)
-                {
-                    AudioComp->Stop();
-                }
-            }
-        }
-    }
-
-    // Check if we finished our turn
-    if (bIsSpeakingInternal && bLLMFinished && PendingSentenceCount.GetValue() == 0 && PendingAudioChunkCount.GetValue() == 0 && bAudioQueueDrained)
-    {
-        // One final check: is the audio component actually finished?
-        if (!AudioComp || !AudioComp->IsPlaying())
-        {
-            if (!bNotifiedSubsystemFinished)
-            {
-                bNotifiedSubsystemFinished = true;
-                bIsSpeakingInternal = false;
-                
-                if (UWorld* W = GetWorld())
-                {
-                    if (auto* Sub = W->GetSubsystem<ULocalTalkConversationSubsystem>())
-                    {
-                        Sub->ReleaseTurn(this);
-                    }
-                }
-
-                // Reset for next turn after informing the Director.
-                bSpokeThisTurn = false;
-            }
-        }
-    }
-}
-
-void ULocalCharacterComponent::SendPromptAndSpeakStreamingInProc(const FString& Prompt)
-{
-    if (UWorld* W = GetWorld())
-    {
-        if (auto* Sub = W->GetSubsystem<ULocalTalkConversationSubsystem>())
-        {
-            Sub->RequestTurn(this, Prompt);
-        }
-    }
-}
-
-void ULocalCharacterComponent::SpeakTextLocal(const FString& Text)
-{
-    if (UWorld* W = GetWorld())
-    {
-        if (auto* Sub = W->GetSubsystem<ULocalTalkConversationSubsystem>())
-        {
-            // We use a prefix to identify raw text vs prompt
-            Sub->RequestTurn(this, TEXT("RAW:") + Text);
-        }
-    }
-}
-
-void ULocalCharacterComponent::InternalGrantTurn(const FString& PromptOrText)
-{
-    bIsSpeakingInternal = true;
-    bLLMFinished = false;
-    bAudioQueueDrained = false;
-    bNotifiedSubsystemFinished = false;
-    bInterrupted = false;
-    bSpokeThisTurn = false;
-    LLMTextBuffer.Reset();
-    LLMFullText.Reset();
-
-    EnsureAudio();
-    StartTTSWorker(ResolvePaths());
-
-    if (PromptOrText.StartsWith(TEXT("RAW:")))
-    {
-        FString CleanText = PromptOrText.Mid(4);
-        bLLMFinished = true;
-        EnqueueSentence(CleanText);
-        bAudioQueueDrained = true;
-    }
-    else
-    {
-        // IMPORTANT:
-        // Use the in-proc backend's own prompt wrapper (see LocalTalkerInProcAsync::BuildPrompt),
-        // which includes an output contract ("ONE line of spoken dialogue") and avoids chatty
-        // "User:" / "Assistant:" transcript leakage.
-        //
-        // We still include short rolling history in the *user prompt* so the model has context.
-        FLocalTalkerCharacterConfig Config = ResolveConfig();
-
-        // Map per-character fields into the config used by the prompt wrapper.
-        if (!Directions.IsEmpty()) Config.Directions = Directions;
-        if (!Desc.IsEmpty()) Config.CharacterDescription = Desc;
-
-        FString UserPrompt = PromptOrText;
-        if (UWorld* W = GetWorld())
-        {
-            if (auto* Sub = W->GetSubsystem<ULocalTalkConversationSubsystem>())
-            {
-                const TArray<FLocalTalkMessage> FullHistory = Sub->GetContextHistory(this);
-                if (FullHistory.Num() > 0)
-                {
-                    FString H;
-                    H += TEXT("Conversation so far:\n");
-                    for (const auto& M : FullHistory)
-                    {
-                        // History may contain old transcript-y content; sanitize lightly for better conditioning.
-                        const FString Clean = LocalTalkerSanitizeDialogueLine(M.Content);
-                        if (!Clean.IsEmpty())
-                        {
-                            // Avoid "Name: ..." formatting in the conditioning text; it encourages the model
-                            // to emit speaker-label transcripts. Prefer a narrative framing.
-                            H += FString::Printf(TEXT("%s said \"%s\".\n"), *M.SpeakerName, *Clean);
-                        }
-                    }
-                    H += TEXT("\n");
-                    H += UserPrompt;
-                    UserPrompt = MoveTemp(H);
-                }
-            }
-        }
-
-        ActiveLLM = ULocalTalkerInProcGenerateAsync::GenerateStreamingInProc(this, ResolvePaths(), Config, UserPrompt);
-        ActiveLLM->OnToken.AddDynamic(this, &ULocalCharacterComponent::HandleLLMToken);
-        ActiveLLM->OnDelta.AddDynamic(this, &ULocalCharacterComponent::HandleLLMDelta);
-        ActiveLLM->OnCompleted.AddDynamic(this, &ULocalCharacterComponent::HandleLLMCompleted);
-        ActiveLLM->OnError.AddDynamic(this, &ULocalCharacterComponent::HandleLLMError);
-        ActiveLLM->Activate();
-    }
-}
-
-void ULocalCharacterComponent::OnHeardSpeech(const FString& InSpeakerName, const FString& Text, bool bFromUser)
-{
-    // Personal history has been removed in favor of the centralized Subsystem history.
-    // We only log here for debug purposes.
-
-    if (TraceEnabled(this))
-    {
-        UE_LOG(LogLocalTalker, Log, TEXT("[%s] Heard from %s: %s"), 
-            *GetSpeakerNameResolved(), *InSpeakerName, *LocalTalkerOneLineTrunc(Text, 40));
-    }
-}
-
-void ULocalCharacterComponent::Interrupt()
-{
-    bInterrupted = true;
-    bLLMFinished = true;
-    bAudioQueueDrained = true;
-    bSpokeThisTurn = false;
-    if (AudioComp) AudioComp->Stop();
-    if (ActiveLLM) ActiveLLM->Cancel();
-    
-    if (bIsSpeakingInternal && !bNotifiedSubsystemFinished)
+    // Notify the Director when this turn is truly finished (LLM done + TTS jobs done + audio finished).
+    // IMPORTANT: we must not ReleaseTurn while Piper is still generating audio (queues can look empty briefly).
+    if (!bNotifiedSubsystemFinished &&
+        bLLMFinished &&
+        PendingSentenceCount.GetValue() == 0 &&
+        PendingAudioChunkCount.GetValue() == 0 &&
+        bAudioQueueDrained &&
+        (!AudioComp || !AudioComp->IsPlaying()))
     {
         bNotifiedSubsystemFinished = true;
-        bIsSpeakingInternal = false;
         if (UWorld* W = GetWorld())
         {
             if (auto* Sub = W->GetSubsystem<ULocalTalkConversationSubsystem>())
@@ -333,262 +130,635 @@ void ULocalCharacterComponent::Interrupt()
     }
 }
 
-void ULocalCharacterComponent::ClearConversation()
+void ULocalCharacterComponent::EnsureAudio()
 {
-    // Centralized history should be cleared via the Subsystem if needed.
+    if (AudioComp && ProcWave) return;
+
+    AActor* Owner = GetOwner();
+    if (!Owner) return;
+
+    AudioComp = Owner->FindComponentByClass<UAudioComponent>();
+    if (!AudioComp)
+    {
+        AudioComp = NewObject<UAudioComponent>(Owner, TEXT("LocalTalkerAudio"));
+        AudioComp->bAutoActivate = false;
+        AudioComp->RegisterComponent();
+        if (Owner->GetRootComponent())
+        {
+            AudioComp->AttachToComponent(Owner->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
+        }
+    }
+
+    // If you couldn't hear anything, this is the most common reason: the audio was spatialized / attenuated.
+    // Force 2D/UI audio by default so it's always audible while testing.
+    if (bForce2DAudio)
+    {
+        AudioComp->bAllowSpatialization = false;
+        AudioComp->bIsUISound = true;
+    }
+
+    ProcWave = NewObject<USoundWaveProcedural>(this, TEXT("LocalTalkerProcWave"));
+    ProcWave->bLooping = false;
+
+    // Default format; will be overridden once we load the first WAV chunk.
+    ProcNumChannels = 1;
+    ProcSampleRate = 22050;
+    ProcWave->NumChannels = ProcNumChannels;
+    ProcWave->SetSampleRate(ProcSampleRate);
+
+    AudioComp->SetSound(ProcWave);
 }
 
 FString ULocalCharacterComponent::GetSpeakerNameResolved() const
 {
     if (!SpeakerName.IsEmpty()) return SpeakerName;
-    return GetOwner() ? GetOwner()->GetActorLabel() : TEXT("None");
+    if (const AActor* Owner = GetOwner())
+    {
+        return Owner->GetName();
+    }
+    return TEXT("LocalTalker");
 }
 
-// --- Internal Machinery ---
-
-void ULocalCharacterComponent::EnqueueSentence(const FString& Sentence)
+TArray<FString> ULocalCharacterComponent::GetVoiceOptions() const
 {
-    FString S = LocalTalkerSanitizeDialogueLine(Sentence);
-    if (S.IsEmpty()) return;
+    TArray<FString> Out;
 
-    bSpokeThisTurn = true;
-    PendingSentenceCount.Increment();
-    SentenceQueue.Enqueue(S);
-    EmitSubtitle(S);
-
-    if (UWorld* W = GetWorld())
+    // 1) Explicit list from settings
+    if (const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>())
     {
-        if (auto* Sub = W->GetSubsystem<ULocalTalkConversationSubsystem>())
+        for (const FLocalTalkVoiceOption& V : S->Voices)
         {
-            Sub->BroadcastSentence(this, S, false);
-        }
-    }
-}
-
-void ULocalCharacterComponent::HandleLLMCompleted(const FString& Text)
-{
-    ExtractAndEnqueueSentences(true);
-    bLLMFinished = true;
-    bAudioQueueDrained = true;
-}
-
-void ULocalCharacterComponent::HandleLLMToken(const FString& Token)
-{
-    LLMTextBuffer += Token;
-    LLMFullText += Token;
-}
-
-void ULocalCharacterComponent::HandleLLMDelta(const FString& Text) {}
-void ULocalCharacterComponent::HandleLLMError(const FString& Error)
-{
-    // IMPORTANT: Previously this silently swallowed errors from the LLM async node,
-    // making it look like characters "finish talking" instantly with no output.
-    // Common cause: missing Project Settings -> LocalTalker -> DefaultPaths (LlamaLibPath / LlamaModelPath).
-
-    UE_LOG(LogLocalTalker, Warning, TEXT("[%s] LLM error: %s"), *GetSpeakerNameResolved(), *Error);
-    OnError.Broadcast(Error);
-
-    if (bShowOnScreenSubtitles && GEngine)
-    {
-        GEngine->AddOnScreenDebugMessage(
-            -1,
-            6.0f,
-            FColor::Red,
-            FString::Printf(TEXT("%s LLM error: %s"), *GetSpeakerNameResolved(), *Error)
-        );
-    }
-
-    // Mark as finished so the Director can release the turn; we intentionally DO NOT set bSpokeThisTurn.
-    bLLMFinished = true;
-    bAudioQueueDrained = true;
-}
-
-void ULocalCharacterComponent::ExtractAndEnqueueSentences(bool bForceFlush)
-{
-    if (LLMTextBuffer.Len() < MinCharsBeforeSpeak && !bForceFlush) return;
-
-    int32 CutIdx = INDEX_NONE;
-    for (int32 i = 0; i < LLMTextBuffer.Len(); i++)
-    {
-        TCHAR C = LLMTextBuffer[i];
-        if (C == '.' || C == '!' || C == '?' || C == '\n')
-        {
-            CutIdx = i;
-            if (i + 1 >= MinCharsBeforeSpeak) break;
-        }
-    }
-
-    if (CutIdx != INDEX_NONE || (bForceFlush && LLMTextBuffer.Len() > 0))
-    {
-        int32 Len = (CutIdx != INDEX_NONE) ? CutIdx + 1 : LLMTextBuffer.Len();
-        FString S = LLMTextBuffer.Left(Len);
-        LLMTextBuffer = LLMTextBuffer.Mid(Len);
-        EnqueueSentence(S);
-    }
-}
-
-void ULocalCharacterComponent::PumpAudioToProcedural()
-{
-    if (!ProcWave) return;
-    
-    FAudioChunk Chunk;
-    while (AudioQueue.Dequeue(Chunk))
-    {
-        PendingAudioChunkCount.Decrement();
-
-        // Ensure the procedural wave matches the chunk format.
-        if (Chunk.SampleRate > 0 && ProcWave->GetSampleRateForCurrentPlatform() != Chunk.SampleRate)
-        {
-            ProcWave->SetSampleRate(Chunk.SampleRate);
-        }
-        if (Chunk.NumChannels > 0 && ProcWave->NumChannels != Chunk.NumChannels)
-        {
-            ProcWave->NumChannels = Chunk.NumChannels;
-        }
-
-        ProcWave->QueueAudio(Chunk.Bytes.GetData(), Chunk.Bytes.Num());
-        if (AudioComp && !AudioComp->IsPlaying()) AudioComp->Play();
-    }
-}
-
-void ULocalCharacterComponent::EnsureAudio()
-{
-    if (!AudioComp)
-    {
-        AudioComp = NewObject<UAudioComponent>(GetOwner());
-        AudioComp->RegisterComponent();
-    }
-    if (!ProcWave)
-    {
-        ProcWave = NewObject<USoundWaveProcedural>();
-        ProcWave->SetSampleRate(16000);
-        ProcWave->NumChannels = 1;
-        ProcWave->Duration = INDEFINITELY_LOOPING_DURATION;
-        ProcWave->bLooping = false;
-    }
-    if (AudioComp->GetSound() != ProcWave)
-    {
-        AudioComp->SetSound(ProcWave);
-    }
-}
-
-FString ULocalCharacterComponent::BuildPromptWithHistory(const FLocalTalkerCharacterConfig& Config, const FString& UserText) const
-{
-    FString P = FString::Printf(TEXT("System: You are %s. %s %s\n\n"), *GetSpeakerNameResolved(), *Directions, *Desc);
-    
-    TArray<FLocalTalkMessage> FullHistory;
-    if (UWorld* W = GetWorld())
-    {
-        if (auto* Sub = W->GetSubsystem<ULocalTalkConversationSubsystem>())
-        {
-            FullHistory = Sub->GetContextHistory(const_cast<ULocalCharacterComponent*>(this));
-        }
-    }
-
-    for (const auto& M : FullHistory)
-    {
-        P += FString::Printf(TEXT("%s: %s\n"), *M.SpeakerName, *M.Content);
-    }
-
-    // Append the instruction or the direct prompt if it's not already the last item in history
-    if (!UserText.IsEmpty())
-    {
-        if (UserText.StartsWith(TEXT("Respond to ")))
-        {
-            P += FString::Printf(TEXT("\n(Instruction: %s)\n"), *UserText);
-        }
-        else if (!UserText.StartsWith(TEXT("RAW:")))
-        {
-            // Only add if not already in history
-            bool bInHistory = false;
-            if (FullHistory.Num() > 0 && FullHistory.Last().Content == UserText)
+            if (V.Id.IsNone()) continue;
+            if (!V.VoiceOnnxPath.IsEmpty() && FPaths::FileExists(V.VoiceOnnxPath))
             {
-                bInHistory = true;
-            }
-
-            if (!bInHistory)
-            {
-                P += FString::Printf(TEXT("User: %s\n"), *UserText);
+                Out.Add(V.Id.ToString());
             }
         }
     }
 
-    P += TEXT("Assistant: ");
-    return P;
+    // 2) Auto-discover any .onnx in the plugin voices folder
+    if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LocalTalker")))
+    {
+        const FString VoicesDir = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources/Voices"));
+        TArray<FString> Found;
+        IPlatformFile& PF = FPlatformFileManager::Get().GetPlatformFile();
+        PF.FindFiles(Found, *VoicesDir, TEXT(".onnx"));
+        for (const FString& Path : Found)
+        {
+            if (!FPaths::FileExists(Path)) continue;
+            const FString Base = FString(FPathViews::GetCleanFilename(Path));
+            FString Stem = Base;
+            Stem.RemoveFromEnd(TEXT(".onnx"));
+            Out.AddUnique(Stem);
+        }
+    }
+
+    Out.Sort();
+    return Out;
+}
+
+FString ULocalCharacterComponent::ResolveVoiceOnnxPath() const
+{
+    const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>();
+
+    auto ResolveFromSettingsId = [&](FName Id) -> FString
+    {
+        if (!S || Id.IsNone()) return FString();
+        for (const FLocalTalkVoiceOption& V : S->Voices)
+        {
+            if (V.Id == Id && !V.VoiceOnnxPath.IsEmpty() && FPaths::FileExists(V.VoiceOnnxPath))
+            {
+                return V.VoiceOnnxPath;
+            }
+        }
+        return FString();
+    };
+
+    // 1) Component override
+    if (!VoiceId.IsNone())
+    {
+        if (const FString P = ResolveFromSettingsId(VoiceId); !P.IsEmpty())
+        {
+            return P;
+        }
+
+        // fall back to auto-discovery (Id == filename stem)
+        if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LocalTalker")))
+        {
+            const FString P = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources/Voices"), VoiceId.ToString() + TEXT(".onnx"));
+            if (FPaths::FileExists(P)) return P;
+        }
+    }
+
+    // 2) First valid voice from settings
+    if (S)
+    {
+        for (const FLocalTalkVoiceOption& V : S->Voices)
+        {
+            if (!V.Id.IsNone() && !V.VoiceOnnxPath.IsEmpty() && FPaths::FileExists(V.VoiceOnnxPath))
+            {
+                return V.VoiceOnnxPath;
+            }
+        }
+    }
+
+    // 3) Default fallback (bundled)
+    if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LocalTalker")))
+    {
+        const FString P = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources/Voices/en_US-lessac-small.onnx"));
+        if (FPaths::FileExists(P)) return P;
+    }
+
+    return FString();
+}
+
+void ULocalCharacterComponent::DebugPrintLine(const FString& Line, float Seconds, bool bNewLine) const
+{
+    if (!GEngine) return;
+    // Stable per-component line (plus optional offset when we want a second line).
+    const int32 KeyBase = (int32)((PTRINT)this & 0x7fffffff);
+    const int32 Key = bNewLine ? (KeyBase + 1) : KeyBase;
+    GEngine->AddOnScreenDebugMessage(Key, Seconds, FColor::Cyan, Line);
 }
 
 void ULocalCharacterComponent::EmitSubtitle(const FString& Text)
 {
-    OnSubtitle.Broadcast(GetSpeakerNameResolved(), Text);
-    OnSubtitleNative.Broadcast(GetSpeakerNameResolved(), Text);
-    if (bShowOnScreenSubtitles && GEngine)
+    const FString Speaker = GetSpeakerNameResolved();
+    OnSubtitle.Broadcast(Speaker, Text);
+
+    if (bShowOnScreenSubtitles)
     {
-        GEngine->AddOnScreenDebugMessage(-1, 4.0f, FColor::White, FString::Printf(TEXT("%s: %s"), *GetSpeakerNameResolved(), *Text));
+        DebugPrintLine(FString::Printf(TEXT("%s: %s"), *Speaker, *Text), OnScreenSubtitleSeconds, /*bNewLine*/ true);
     }
 }
 
-static FString LocalTalkerPluginBaseDir()
+static FString TrimToLastNChars(const FString& In, int32 MaxChars)
 {
-    if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LocalTalker")))
+    if (MaxChars <= 0) return FString();
+    if (In.Len() <= MaxChars) return In;
+    return In.Right(MaxChars);
+}
+
+static bool LocalTalkerModelLooksLikeLlama3(const FString& ModelPath)
+{
+    const FString Base = FPaths::GetBaseFilename(ModelPath).ToLower();
+    return Base.Contains(TEXT("llama-3")) || Base.Contains(TEXT("llama3"));
+}
+
+static FString LocalTalkerOneLine(const FString& In)
+{
+    FString S = In;
+    S.ReplaceInline(TEXT("\r"), TEXT(" "));
+    S.ReplaceInline(TEXT("\n"), TEXT(" "));
+    S.ReplaceInline(TEXT("\t"), TEXT(" "));
+    S.TrimStartAndEndInline();
+    while (S.Contains(TEXT("  ")))
     {
-        return Plugin->GetBaseDir();
+        S.ReplaceInline(TEXT("  "), TEXT(" "));
     }
-    return FString();
+    return S;
+}
+
+static FString LocalTalkerJsonEscape(const FString& In)
+{
+    FString S = In;
+    S.ReplaceInline(TEXT("\\"), TEXT("\\\\"));
+    S.ReplaceInline(TEXT("\""), TEXT("\\\""));
+    S.ReplaceInline(TEXT("\r"), TEXT("\\r"));
+    S.ReplaceInline(TEXT("\n"), TEXT("\\n"));
+    S.ReplaceInline(TEXT("\t"), TEXT("\\t"));
+    return S;
+}
+
+static bool LocalTalkerTryExtractJsonStringField(const FString& In, const FString& Key, FString& OutValue)
+{
+    // Best-effort: extract `"Key":"..."`
+    const FString Needle = FString::Printf(TEXT("\"%s\""), *Key);
+    int32 KeyPos = In.Find(Needle, ESearchCase::IgnoreCase, ESearchDir::FromStart);
+    if (KeyPos == INDEX_NONE) return false;
+
+    int32 ColonPos = In.Find(TEXT(":"), ESearchCase::IgnoreCase, ESearchDir::FromStart, KeyPos + Needle.Len());
+    if (ColonPos == INDEX_NONE) return false;
+
+    int32 QuotePos = In.Find(TEXT("\""), ESearchCase::IgnoreCase, ESearchDir::FromStart, ColonPos + 1);
+    if (QuotePos == INDEX_NONE) return false;
+
+    FString Raw;
+    Raw.Reserve(In.Len() - QuotePos);
+    bool bEscape = false;
+    for (int32 i = QuotePos + 1; i < In.Len(); i++)
+    {
+        const TCHAR C = In[i];
+        if (bEscape)
+        {
+            Raw.AppendChar(TEXT('\\'));
+            Raw.AppendChar(C);
+            bEscape = false;
+            continue;
+        }
+        if (C == TEXT('\\'))
+        {
+            bEscape = true;
+            continue;
+        }
+        if (C == TEXT('"'))
+        {
+            break;
+        }
+        Raw.AppendChar(C);
+    }
+
+    // Unescape a minimal set
+    FString S = Raw;
+    S.ReplaceInline(TEXT("\\\\"), TEXT("\\"));
+    S.ReplaceInline(TEXT("\\\""), TEXT("\""));
+    S.ReplaceInline(TEXT("\\n"), TEXT("\n"));
+    S.ReplaceInline(TEXT("\\r"), TEXT("\r"));
+    S.ReplaceInline(TEXT("\\t"), TEXT("\t"));
+    OutValue = S;
+    return true;
+}
+
+static FString LocalTalkerCleanSpokenText(const FString& In)
+{
+    FString S = TrimSentence(In);
+    if (S.IsEmpty()) return S;
+
+    // If the model echoed our structured metadata, try to extract the "text" field.
+    if (S.StartsWith(TEXT("{")) || S.Contains(TEXT("\"text\"")))
+    {
+        FString Extracted;
+        if (LocalTalkerTryExtractJsonStringField(S, TEXT("text"), Extracted))
+        {
+            S = Extracted;
+        }
+    }
+
+    // If the model echoed our *old* plain-structured format, extract the Text: line.
+    // Example:
+    // Speaker: Assistant
+    // FromUser: false
+    // Text: Hello there!
+    {
+        const int32 TextPos = S.Find(TEXT("Text:"), ESearchCase::IgnoreCase, ESearchDir::FromStart);
+        if (TextPos != INDEX_NONE)
+        {
+            S = S.Mid(TextPos + 5);
+        }
+    }
+
+    // Strip surrounding quotes/braces that often happen when outputs are fragmented.
+    S.TrimStartAndEndInline();
+
+    // Strip common transcript / role prefixes repeatedly ("User:", "Assistant:", "Otis:", etc.)
+    // This is critical because if any prefix leaks into the context, the Director will propagate it forever.
+    auto StripPrefix = [&S](const TCHAR* Prefix) -> bool
+    {
+        const int32 PrefixLen = FCString::Strlen(Prefix);
+        if (S.Len() >= PrefixLen && S.Left(PrefixLen).Equals(Prefix, ESearchCase::IgnoreCase))
+        {
+            S = S.Mid(PrefixLen);
+            S.TrimStartAndEndInline();
+            return true;
+        }
+        return false;
+    };
+
+    for (;;)
+    {
+        bool bStripped = false;
+        bStripped |= StripPrefix(TEXT("Assistant:"));
+        bStripped |= StripPrefix(TEXT("User:"));
+        bStripped |= StripPrefix(TEXT("System:"));
+        bStripped |= StripPrefix(TEXT("Director:"));
+        bStripped |= StripPrefix(TEXT("NPC:"));
+
+        // Generic "Name:" prefix (single token up to 24 chars, no spaces) — catches "Milo:" / "Otis:" etc.
+        int32 ColonIdx = S.Find(TEXT(":"), ESearchCase::IgnoreCase, ESearchDir::FromStart);
+        if (ColonIdx > 0 && ColonIdx <= 24)
+        {
+            const FString Left = S.Left(ColonIdx);
+            if (!Left.Contains(TEXT(" ")) && !Left.Contains(TEXT("\t")))
+            {
+                S = S.Mid(ColonIdx + 1);
+                S.TrimStartAndEndInline();
+                bStripped = true;
+            }
+        }
+
+        if (!bStripped) break;
+    }
+
+    // Drop common "metadata-only" junk.
+    if (S.Equals(TEXT("Speaker:"), ESearchCase::IgnoreCase) ||
+        S.StartsWith(TEXT("Speaker:"), ESearchCase::IgnoreCase) ||
+        S.StartsWith(TEXT("FromUser:"), ESearchCase::IgnoreCase))
+    {
+        // If it's just those headers with no actual dialogue, ignore it completely.
+        const FString One = LocalTalkerOneLine(S);
+        if (One.Equals(TEXT("Speaker: Assistant"), ESearchCase::IgnoreCase) ||
+            One.Equals(TEXT("Speaker: User"), ESearchCase::IgnoreCase) ||
+            One.Equals(TEXT("Speaker: Director"), ESearchCase::IgnoreCase) ||
+            One.StartsWith(TEXT("Speaker:"), ESearchCase::IgnoreCase) ||
+            One.StartsWith(TEXT("FromUser:"), ESearchCase::IgnoreCase))
+        {
+            return FString();
+        }
+    }
+    while (S.StartsWith(TEXT("\"")) && S.EndsWith(TEXT("\"")) && S.Len() >= 2)
+    {
+        S = S.Mid(1, S.Len() - 2);
+        S.TrimStartAndEndInline();
+    }
+    while ((S == TEXT("\"}") || S == TEXT("}") || S == TEXT("\"") || S == TEXT("\"}"))) // common junk fragments
+    {
+        S.Reset();
+        break;
+    }
+
+    // Collapse newlines/tabs -> spaces
+    S.ReplaceInline(TEXT("\r"), TEXT(" "));
+    S.ReplaceInline(TEXT("\n"), TEXT(" "));
+    S.ReplaceInline(TEXT("\t"), TEXT(" "));
+    while (S.Contains(TEXT("  "))) S.ReplaceInline(TEXT("  "), TEXT(" "));
+    S.TrimStartAndEndInline();
+    return S;
+}
+
+static FString LocalTalkerBriefFor(const ULocalCharacterComponent* C)
+{
+    if (!C) return FString();
+
+    FString Brief = !C->Desc.IsEmpty() ? C->Desc : C->Directions;
+    Brief = LocalTalkerOneLine(Brief);
+
+    // Keep it short to avoid swamping the system prompt.
+    const int32 MaxChars = 180;
+    if (Brief.Len() > MaxChars)
+    {
+        Brief = Brief.Left(MaxChars) + TEXT("...");
+    }
+    return Brief;
+}
+
+static FString LocalTalkerBuildLlama3PromptFromContext(
+    const FString& SelfSpeakerName,
+    const FLocalTalkerCharacterConfig& C,
+    const TArray<FLocalTalkMessage>& ContextHistory,
+    const TArray<ULocalCharacterComponent*>& ContextParticipants,
+    const FString& TurnPrompt // may be a Director instruction; user prompts are usually already in ContextHistory
+)
+{
+    // Llama 3.x instruct template per llama.cpp chat templating docs:
+    // https://github.com/ggml-org/llama.cpp/wiki/Templates-supported-by-llama_chat_apply_template
+    auto AppendTurn = [](FString& P, const TCHAR* Role, const FString& Content)
+    {
+        P += TEXT("<|start_header_id|>");
+        P += Role;
+        P += TEXT("<|end_header_id|>\n\n");
+        P += Content;
+        P += TEXT("<|eot_id|>");
+    };
+
+    // ---- System ----
+    FString SystemBlock;
+    SystemBlock += FString::Printf(TEXT("You are %s.\n\n"), *SelfSpeakerName);
+
+    // Cast briefs for everyone who has talked (based on the context history speaker list).
+    {
+        TSet<FString> Seen;
+        TArray<FString> Speakers;
+        // Keep a stable order: self first, then speakers in first-appearance order.
+        if (!SelfSpeakerName.IsEmpty())
+        {
+            Seen.Add(SelfSpeakerName);
+            Speakers.Add(SelfSpeakerName);
+        }
+        for (const FLocalTalkMessage& M : ContextHistory)
+        {
+            if (!M.SpeakerName.IsEmpty())
+            {
+                if (!Seen.Contains(M.SpeakerName))
+                {
+                    Seen.Add(M.SpeakerName);
+                    Speakers.Add(M.SpeakerName);
+                }
+            }
+        }
+
+        if (Speakers.Num() > 0)
+        {
+            SystemBlock += TEXT("CAST BRIEFS (short):\n");
+            for (const FString& Name : Speakers)
+            {
+                const ULocalCharacterComponent* Match = nullptr;
+                for (ULocalCharacterComponent* P : ContextParticipants)
+                {
+                    if (P && P->GetSpeakerNameResolved().Equals(Name, ESearchCase::IgnoreCase))
+                    {
+                        Match = P;
+                        break;
+                    }
+                }
+
+                FString Brief = LocalTalkerBriefFor(Match);
+                if (Brief.IsEmpty()) Brief = TEXT("(no brief provided)");
+                SystemBlock += FString::Printf(TEXT("- %s: %s\n"), *Name, *Brief);
+            }
+            SystemBlock += TEXT("\n");
+        }
+    }
+
+    if (!C.Directions.IsEmpty() || !C.SystemPrompt.IsEmpty())
+    {
+        const FString Directions = !C.Directions.IsEmpty() ? C.Directions : C.SystemPrompt;
+        if (!Directions.IsEmpty())
+        {
+            SystemBlock += TEXT("DIRECTIONS:\n");
+            SystemBlock += Directions.TrimStartAndEnd();
+            SystemBlock += TEXT("\n\n");
+        }
+    }
+
+    if (!C.CharacterDescription.IsEmpty() || !C.Persona.IsEmpty())
+    {
+        const FString Desc = !C.CharacterDescription.IsEmpty() ? C.CharacterDescription : C.Persona;
+        if (!Desc.IsEmpty())
+        {
+            SystemBlock += TEXT("CHARACTER:\n");
+            SystemBlock += Desc.TrimStartAndEnd();
+            SystemBlock += TEXT("\n\n");
+        }
+    }
+
+    SystemBlock +=
+        TEXT("RULES:\n")
+        TEXT("- Stay strictly in character at all times.\n")
+        TEXT("- Keep continuity with the conversation.\n")
+        TEXT("- Always move the conversation forward; add a NEW concrete detail or viewpoint.\n")
+        TEXT("- Do not echo the last line verbatim.\n")
+        TEXT("- Output only the spoken dialogue (no speaker labels, no transcripts). Never output lines like \"User:\", \"Assistant:\", or \"Name:\".\n")
+        TEXT("- Do not output any control tokens or markup.\n")
+        TEXT("- Speak in 2–4 complete sentences unless asked for shorter.\n");
+
+    // ---- History ----
+    // Prefer last N messages and also respect MaxContextChars (approx, content-only) so prompts don't balloon.
+    const int32 MaxMsgs = (C.MaxHistoryMessages > 0) ? C.MaxHistoryMessages : ContextHistory.Num();
+    int32 StartIdx = 0;
+    if (ContextHistory.Num() > MaxMsgs)
+    {
+        StartIdx = ContextHistory.Num() - MaxMsgs;
+    }
+    const int32 MaxChars = (C.MaxContextChars > 0) ? C.MaxContextChars : 1600;
+    if (MaxChars > 0)
+    {
+        // Trim oldest messages until the content-only budget fits (speaker + content).
+        int64 BudgetUsed = 0;
+        for (int32 i = StartIdx; i < ContextHistory.Num(); i++)
+        {
+            BudgetUsed += (int64)ContextHistory[i].SpeakerName.Len();
+            BudgetUsed += (int64)ContextHistory[i].Content.Len();
+            BudgetUsed += 8;
+        }
+        while (StartIdx < ContextHistory.Num() && BudgetUsed > (int64)MaxChars)
+        {
+            BudgetUsed -= (int64)ContextHistory[StartIdx].SpeakerName.Len();
+            BudgetUsed -= (int64)ContextHistory[StartIdx].Content.Len();
+            BudgetUsed -= 8;
+            StartIdx++;
+        }
+    }
+
+    FString Prompt;
+    Prompt.Reserve(SystemBlock.Len() + 2048);
+    Prompt += TEXT("<|begin_of_text|>");
+    AppendTurn(Prompt, TEXT("system"), SystemBlock);
+
+    for (int32 i = StartIdx; i < ContextHistory.Num(); i++)
+    {
+        const FLocalTalkMessage& M = ContextHistory[i];
+        const FString Clean = LocalTalkerOneLine(M.Content);
+        if (Clean.IsEmpty()) continue;
+
+        const bool bIsSelf = (!SelfSpeakerName.IsEmpty() && M.SpeakerName.Equals(SelfSpeakerName, ESearchCase::IgnoreCase));
+        if (bIsSelf)
+        {
+            AppendTurn(Prompt, TEXT("assistant"), Clean + TEXT("\n\n"));
+        }
+        else
+        {
+            const FString Speaker = M.SpeakerName.IsEmpty() ? TEXT("Unknown") : M.SpeakerName;
+            const bool bUserish = M.bFromUser || Speaker.Equals(TEXT("User"), ESearchCase::IgnoreCase);
+            if (bUserish)
+            {
+                // For true user input, avoid adding any "User:" prefix — Llama will often mirror it.
+                AppendTurn(Prompt, TEXT("user"), Clean + TEXT("\n\n"));
+            }
+            else
+            {
+                // For other speakers, keep it unambiguous but avoid "Name:" transcript formatting.
+                AppendTurn(Prompt, TEXT("user"), FString::Printf(TEXT("[%s] %s\n\n"), *Speaker, *Clean));
+            }
+        }
+    }
+
+    // ---- Turn instruction (Director / internal) ----
+    if (!TurnPrompt.IsEmpty() && (TurnPrompt.StartsWith(TEXT("Director instruction:"), ESearchCase::IgnoreCase) || TurnPrompt.StartsWith(TEXT("Respond to "), ESearchCase::IgnoreCase)))
+    {
+        const FString Clean = LocalTalkerOneLine(TurnPrompt);
+        AppendTurn(Prompt, TEXT("user"), FString::Printf(TEXT("Instruction (do not repeat): %s\n\n"), *Clean));
+    }
+
+    // Generation prompt
+    Prompt += TEXT("<|start_header_id|>assistant<|end_header_id|>\n\n");
+    return Prompt;
+}
+
+FString ULocalCharacterComponent::BuildPromptWithHistory(const FLocalTalkerCharacterConfig& Config, const FString& UserText) const
+{
+    // This helper remains for legacy/direct usage. For Director-managed multi-character prompting,
+    // see InternalGrantTurn() which uses the Conversation Subsystem history + cast briefs.
+    const FString ModelPath = ResolvePaths().LlamaModelPath;
+    if (LocalTalkerModelLooksLikeLlama3(ModelPath))
+    {
+        TArray<FLocalTalkMessage> Context;
+        Context.Add({ TEXT("User"), UserText, true });
+        return LocalTalkerBuildLlama3PromptFromContext(GetSpeakerNameResolved(), Config, Context, /*Participants*/ {}, /*TurnPrompt*/ FString());
+    }
+
+    // Minimal fallback for non-llama3 models.
+    FString P;
+    P += TEXT("User: ") + UserText + TEXT("\nAssistant:");
+    return P;
+}
+
+void ULocalCharacterComponent::EnsureProcWaveFormat(int32 SampleRate, int32 NumChannels)
+{
+    // If unknown/invalid, keep the existing format.
+    if (SampleRate <= 0 || NumChannels <= 0) return;
+    if (!ProcWave) return;
+
+    if (ProcSampleRate == SampleRate && ProcNumChannels == NumChannels) return;
+
+    // Changing format mid-stream is risky; reset audio and restart playback.
+    if (AudioComp) AudioComp->Stop();
+    ProcWave->ResetAudio();
+    bAudioStarted = false;
+
+    ProcSampleRate = SampleRate;
+    ProcNumChannels = NumChannels;
+    ProcWave->NumChannels = ProcNumChannels;
+    ProcWave->SetSampleRate(ProcSampleRate);
 }
 
 FLocalTalkerRuntimePaths ULocalCharacterComponent::ResolvePaths() const
 {
-    FLocalTalkerRuntimePaths Out = PathsOverride;
+    if (!bUseProjectSettingsPaths) return PathsOverride;
 
-    if (bUseProjectSettingsPaths)
-    {
-        if (const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>())
-        {
-            Out = S->DefaultPaths;
-        }
-    }
+    const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>();
+    FLocalTalkerRuntimePaths Out = S ? S->DefaultPaths : FLocalTalkerRuntimePaths();
 
-    // Overlay any explicit overrides (treat empty strings as "no override").
     if (!PathsOverride.LlamaModelPath.IsEmpty()) Out.LlamaModelPath = PathsOverride.LlamaModelPath;
     if (!PathsOverride.LlamaLibPath.IsEmpty()) Out.LlamaLibPath = PathsOverride.LlamaLibPath;
     if (!PathsOverride.PiperExePath.IsEmpty()) Out.PiperExePath = PathsOverride.PiperExePath;
     if (!PathsOverride.PiperVoiceModelPath.IsEmpty()) Out.PiperVoiceModelPath = PathsOverride.PiperVoiceModelPath;
     if (!PathsOverride.WorkingDir.IsEmpty()) Out.WorkingDir = PathsOverride.WorkingDir;
 
-    // Convenience defaults: if the project settings didn't specify piper paths, try the plugin bundle.
-    const FString BaseDir = LocalTalkerPluginBaseDir();
-    if (!BaseDir.IsEmpty())
+    // Out-of-the-box defaults when shipping bundled artifacts with the plugin.
+    // These are only used if the user hasn't set explicit paths in Project Settings/Overrides.
+    if (Out.WorkingDir.IsEmpty())
     {
-        // llama.cpp defaults (only if bundled files exist)
+        if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LocalTalker")))
+        {
+            Out.WorkingDir = Plugin->GetBaseDir();
+        }
+
+    }
+
+    if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LocalTalker")))
+    {
+        const FString Base = Plugin->GetBaseDir();
+
         if (Out.LlamaLibPath.IsEmpty())
         {
-            const FString Candidate = FPaths::Combine(BaseDir, TEXT("ThirdParty/llama/Win64/Release/libllama.dll"));
-            if (FPaths::FileExists(Candidate))
-            {
-                Out.LlamaLibPath = Candidate;
-            }
+            Out.LlamaLibPath = FPaths::Combine(Base, TEXT("ThirdParty/llama/Win64/Release/libllama.dll"));
         }
+
         if (Out.LlamaModelPath.IsEmpty())
         {
-            // Default bundled model (small) if present.
-            const FString Candidate = FPaths::Combine(BaseDir, TEXT("Resources/Models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"));
-            if (FPaths::FileExists(Candidate))
-            {
-                Out.LlamaModelPath = Candidate;
-            }
+            // Default shipped model path (we'll bundle at least one small, permissive GGUF)
+            Out.LlamaModelPath = FPaths::Combine(Base, TEXT("Resources/Models/Llama-3.2-3B-Q4_K_M.gguf"));
         }
 
         if (Out.PiperExePath.IsEmpty())
         {
-            Out.PiperExePath = FPaths::Combine(BaseDir, TEXT("ThirdParty/piper/Win64/Release/piper.exe"));
+            Out.PiperExePath = FPaths::Combine(Base, TEXT("ThirdParty/piper/Win64/Release/piper.exe"));
         }
+
         if (Out.PiperVoiceModelPath.IsEmpty())
         {
-            Out.PiperVoiceModelPath = FPaths::Combine(BaseDir, TEXT("Resources/Voices/en_US-lessac-small.onnx"));
-        }
-        if (Out.WorkingDir.IsEmpty())
-        {
-            Out.WorkingDir = FPaths::GetPath(Out.PiperExePath);
+            // Default shipped voice model (we'll bundle at least one fast, lightweight voice)
+            Out.PiperVoiceModelPath = FPaths::Combine(Base, TEXT("Resources/Voices/en_US-lessac-small.onnx"));
         }
     }
 
@@ -597,170 +767,593 @@ FLocalTalkerRuntimePaths ULocalCharacterComponent::ResolvePaths() const
 
 FLocalTalkerCharacterConfig ULocalCharacterComponent::ResolveConfig() const
 {
-    FLocalTalkerCharacterConfig Out = CharacterConfigOverride;
+    if (!bUseProjectSettingsConfig) return CharacterConfigOverride;
 
-    if (bUseProjectSettingsConfig)
-    {
-        if (const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>())
-        {
-            Out = S->DefaultCharacterConfig;
-        }
-    }
+    const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>();
+    FLocalTalkerCharacterConfig Out = S ? S->DefaultCharacterConfig : FLocalTalkerCharacterConfig();
 
-    // Overlay explicit overrides (heuristic: only override if non-default-ish / non-empty).
     if (!CharacterConfigOverride.Directions.IsEmpty()) Out.Directions = CharacterConfigOverride.Directions;
     if (!CharacterConfigOverride.CharacterDescription.IsEmpty()) Out.CharacterDescription = CharacterConfigOverride.CharacterDescription;
+
     if (!CharacterConfigOverride.SystemPrompt.IsEmpty()) Out.SystemPrompt = CharacterConfigOverride.SystemPrompt;
     if (!CharacterConfigOverride.Persona.IsEmpty()) Out.Persona = CharacterConfigOverride.Persona;
+
+    Out.MaxContextChars = CharacterConfigOverride.MaxContextChars != 1600 ? CharacterConfigOverride.MaxContextChars : Out.MaxContextChars;
+    Out.MaxHistoryMessages = CharacterConfigOverride.MaxHistoryMessages != 16 ? CharacterConfigOverride.MaxHistoryMessages : Out.MaxHistoryMessages;
+
+    Out.MaxTokens = CharacterConfigOverride.MaxTokens != 192 ? CharacterConfigOverride.MaxTokens : Out.MaxTokens;
+    Out.Temperature = CharacterConfigOverride.Temperature != 0.7f ? CharacterConfigOverride.Temperature : Out.Temperature;
+    Out.Seed = CharacterConfigOverride.Seed != 0 ? CharacterConfigOverride.Seed : Out.Seed;
+
     if (!CharacterConfigOverride.Stop.IsEmpty()) Out.Stop = CharacterConfigOverride.Stop;
 
-    if (CharacterConfigOverride.MaxContextChars != 0) Out.MaxContextChars = CharacterConfigOverride.MaxContextChars;
-    if (CharacterConfigOverride.MaxHistoryMessages != 0) Out.MaxHistoryMessages = CharacterConfigOverride.MaxHistoryMessages;
-    if (CharacterConfigOverride.GpuLayers != 0) Out.GpuLayers = CharacterConfigOverride.GpuLayers;
-    if (CharacterConfigOverride.MaxTokens != 0) Out.MaxTokens = CharacterConfigOverride.MaxTokens;
-    if (CharacterConfigOverride.Temperature != 0.0f) Out.Temperature = CharacterConfigOverride.Temperature;
-    if (CharacterConfigOverride.Seed != 0) Out.Seed = CharacterConfigOverride.Seed;
-
-    Out.GpuBackend = CharacterConfigOverride.GpuBackend;
     Out.bSpeak = CharacterConfigOverride.bSpeak;
     Out.bStreamTokens = CharacterConfigOverride.bStreamTokens;
 
     return Out;
 }
 
-// --- TTS Worker ---
+void ULocalCharacterComponent::Interrupt()
+{
+    bInterrupted = true;
+    bLLMFinished = true;
+
+    if (ActiveLLM)
+    {
+        ActiveLLM->Cancel();
+    }
+
+    LLMTextBuffer.Reset();
+    LLMFullText.Reset();
+
+    FString Tmp;
+    while (SentenceQueue.Dequeue(Tmp)) {}
+
+    TArray<uint8> Buf;
+    while (AudioQueue.Dequeue(Buf)) {}
+
+    PendingSentenceCount.Reset();
+    PendingAudioChunkCount.Reset();
+    bAudioQueueDrained = true;
+
+    if (AudioComp) AudioComp->Stop();
+    if (ProcWave) ProcWave->ResetAudio();
+
+    bAudioStarted = false;
+    ActiveLLM = nullptr;
+
+    // Best-effort clear: QueueSubtitles is exported; KillSubtitles is not.
+    if (bUseUESubtitles)
+    {
+        const PTRINT SubtitleId = (PTRINT)this;
+        TWeakObjectPtr<UWorld> WorldPtr = GetWorld();
+        AsyncTask(ENamedThreads::GameThread, [SubtitleId, WorldPtr]()
+        {
+            UWorld* World = WorldPtr.Get();
+            if (!World) return;
+
+            TArray<FSubtitleCue> Cues;
+            FSubtitleCue Cue;
+            Cue.Text = FText::GetEmpty();
+            Cue.Time = 0.0f;
+            Cues.Add(Cue);
+
+            FSubtitleManager::GetSubtitleManager()->QueueSubtitles(
+                SubtitleId,
+                /*Priority*/ 1000.0f,
+                /*bManualWordWrap*/ false,
+                /*bSingleLine*/ true,
+                /*SoundDuration*/ 0.05f,
+                Cues,
+                /*InStartTime*/ 0.0f,
+                World->GetAudioTimeSeconds()
+            );
+        });
+    }
+}
+
+void ULocalCharacterComponent::ClearConversation()
+{
+    if (UWorld* W = GetWorld())
+    {
+        if (auto* Sub = W->GetSubsystem<ULocalTalkConversationSubsystem>())
+        {
+            Sub->ClearContextHistory(this);
+        }
+    }
+}
+
+void ULocalCharacterComponent::SpeakTextLocal(const FString& Text)
+{
+    bInterrupted = false;
+    bLLMFinished = true;
+
+    EnsureAudio();
+    EnqueueSentence(Text);
+
+    const FLocalTalkerRuntimePaths Paths = ResolvePaths();
+    StartTTSWorker(Paths);
+}
+
+void ULocalCharacterComponent::SendPromptAndSpeakStreamingInProc(const FString& Prompt)
+{
+    if (UWorld* W = GetWorld())
+    {
+        if (auto* Sub = W->GetSubsystem<ULocalTalkConversationSubsystem>())
+        {
+            Sub->RequestTurn(this, Prompt);
+            return;
+        }
+    }
+
+    // Fallback: if Director subsystem isn't present, run directly.
+    InternalGrantTurn(Prompt);
+}
+
+void ULocalCharacterComponent::InternalGrantTurn(const FString& PromptOrText)
+{
+    bInterrupted = false;
+    bLLMFinished = false;
+    bSpokeThisTurn = false;
+    bNotifiedSubsystemFinished = false;
+    bAudioQueueDrained = false;
+    PendingSentenceCount.Reset();
+    PendingAudioChunkCount.Reset();
+
+    LLMTextBuffer.Reset();
+    LLMFullText.Reset();
+    LastTextAppendSeconds = FPlatformTime::Seconds();
+
+    EnsureAudio();
+
+    const FLocalTalkerRuntimePaths Paths = ResolvePaths();
+    const FLocalTalkerCharacterConfig Config = ResolveConfig();
+    StartTTSWorker(Paths);
+
+    // RAW: bypass LLM and speak directly.
+    if (PromptOrText.StartsWith(TEXT("RAW:"), ESearchCase::IgnoreCase))
+    {
+        const FString Raw = PromptOrText.Mid(4);
+        SpeakTextLocal(Raw);
+        bLLMFinished = true;
+        return;
+    }
+
+    // Build a full prompt using the active context (multi-character) when available.
+    FString PromptText;
+    if (UWorld* W = GetWorld())
+    {
+        if (auto* Sub = W->GetSubsystem<ULocalTalkConversationSubsystem>())
+        {
+            const TArray<FLocalTalkMessage> ContextHistory = Sub->GetContextHistory(this);
+            const TArray<ULocalCharacterComponent*> Participants = Sub->GetContextParticipants(this);
+            if (LocalTalkerModelLooksLikeLlama3(Paths.LlamaModelPath))
+            {
+                PromptText = LocalTalkerBuildLlama3PromptFromContext(
+                    GetSpeakerNameResolved(),
+                    Config,
+                    ContextHistory,
+                    Participants,
+                    PromptOrText
+                );
+            }
+        }
+    }
+
+    // If we couldn't build a context-aware prompt, fall back to legacy prompt builder.
+    if (PromptText.IsEmpty())
+    {
+        PromptText = BuildPromptWithHistory(Config, PromptOrText);
+    }
+
+    ActiveLLM = ULocalTalkerInProcGenerateAsync::GenerateStreamingInProcWithPromptText(this, Paths, Config, PromptText);
+    ActiveLLM->OnToken.AddDynamic(this, &ULocalCharacterComponent::HandleLLMToken);
+    ActiveLLM->OnDelta.AddDynamic(this, &ULocalCharacterComponent::HandleLLMDelta);
+    ActiveLLM->OnCompleted.AddDynamic(this, &ULocalCharacterComponent::HandleLLMCompleted);
+    ActiveLLM->OnError.AddDynamic(this, &ULocalCharacterComponent::HandleLLMError);
+    ActiveLLM->Activate();
+}
+
+void ULocalCharacterComponent::OnHeardSpeech(const FString& InSpeakerName, const FString& Text, bool bFromUser)
+{
+    // The Director owns the authoritative context history. This callback is for local reactions / logging.
+    FString OneLine = LocalTalkerOneLine(Text);
+    const int32 MaxChars = 120;
+    if (OneLine.Len() > MaxChars) OneLine = OneLine.Left(MaxChars) + TEXT("...");
+    UE_LOG(LogLocalTalker, Verbose, TEXT("[%s] Heard (%s) from %s: %s"),
+        *GetSpeakerNameResolved(),
+        bFromUser ? TEXT("User") : TEXT("NPC"),
+        *InSpeakerName,
+        *OneLine
+    );
+}
+
+void ULocalCharacterComponent::HandleLLMError(const FString& Error)
+{
+    UE_LOG(LogLocalTalker, Error, TEXT("[%s] LLM error: %s"), *GetSpeakerNameResolved(), *Error);
+    if (bDebugPrintGeneratedText)
+    {
+        DebugPrintLine(FString::Printf(TEXT("[%s] LLM ERROR: %s"), *GetSpeakerNameResolved(), *Error), 6.0f, /*bNewLine*/ false);
+    }
+    OnError.Broadcast(Error);
+    bLLMFinished = true;
+}
+
+void ULocalCharacterComponent::HandleLLMToken(const FString& Token)
+{
+    if (bDebugLogTokens)
+    {
+        UE_LOG(LogLocalTalker, Verbose, TEXT("[%s] token: %s"), *GetSpeakerNameResolved(), *Token);
+    }
+    OnToken.Broadcast(Token);
+}
+
+void ULocalCharacterComponent::HandleLLMDelta(const FString& Text)
+{
+    if (bInterrupted) return;
+    if (Text.IsEmpty()) return;
+
+    LLMTextBuffer += Text;
+    LLMFullText += Text;
+    LastTextAppendSeconds = FPlatformTime::Seconds();
+
+    if (bDebugPrintGeneratedText)
+    {
+        // Show a short rolling window so it stays readable.
+        const int32 MaxChars = 140;
+        const FString Tail = (LLMFullText.Len() > MaxChars) ? LLMFullText.Right(MaxChars) : LLMFullText;
+        DebugPrintLine(FString::Printf(TEXT("[%s] %s"), *GetSpeakerNameResolved(), *Tail), 1.0f, /*bNewLine*/ false);
+    }
+}
+
+void ULocalCharacterComponent::HandleLLMCompleted(const FString& Text)
+{
+    // Text is the full completion (per async node contract).
+    bLLMFinished = true;
+    OnSpokenText.Broadcast(Text);
+    // Flush any trailing text so it gets spoken/broadcast even if it didn't hit a terminator.
+    if (!Text.IsEmpty())
+    {
+        ExtractAndEnqueueSentences(/*bForceFlush*/ true);
+    }
+}
+
+void ULocalCharacterComponent::EnqueueSentence(const FString& Sentence)
+{
+    const FString S = LocalTalkerCleanSpokenText(Sentence);
+    if (S.Len() <= 0) return;
+
+    // PendingSentenceCount represents sentences that still need TTS completion (including in-flight piper work).
+    PendingSentenceCount.Increment();
+
+    SentenceQueue.Enqueue(S);
+    EmitSubtitle(S);
+    bSpokeThisTurn = true;
+    if (UWorld* W = GetWorld())
+    {
+        if (auto* Sub = W->GetSubsystem<ULocalTalkConversationSubsystem>())
+        {
+            Sub->BroadcastSentence(this, S, /*bFromUser*/ false);
+        }
+    }
+    UE_LOG(LogLocalTalker, Log, TEXT("[%s] Enqueued sentence (%d chars)"), *GetSpeakerNameResolved(), S.Len());
+}
+
+void ULocalCharacterComponent::ExtractAndEnqueueSentences(bool bForceFlush)
+{
+    if (!bSpeakStreaming) return;
+    if (LLMTextBuffer.Len() < MinCharsBeforeSpeak && !bForceFlush) return;
+
+    FString Work = LLMTextBuffer;
+    Work.ReplaceInline(TEXT("\r"), TEXT(""));
+
+    int32 CutIdx = INDEX_NONE;
+    for (int32 i = 0; i < Work.Len(); i++)
+    {
+        if (IsSentenceTerminator(Work[i]))
+        {
+            CutIdx = i;
+            if (i + 1 >= MinCharsBeforeSpeak) break;
+        }
+
+        if (i >= MaxSentenceChars)
+        {
+            CutIdx = i;
+            break;
+        }
+
+    }
+
+    if (CutIdx == INDEX_NONE)
+    {
+        if (bForceFlush && Work.Len() > 0)
+        {
+            EnqueueSentence(Work);
+            LLMTextBuffer.Reset();
+        }
+        return;
+    }
+
+    const int32 TakeLen = CutIdx + 1;
+    const FString Sentence = Work.Left(TakeLen);
+    const FString Remainder = Work.Mid(TakeLen);
+
+    EnqueueSentence(Sentence);
+    LLMTextBuffer = Remainder;
+}
 
 class FLocalTalkerTTSWorker : public FRunnable
 {
-    ULocalCharacterComponent* Owner;
-    FLocalTalkerRuntimePaths Paths;
 public:
-    FLocalTalkerTTSWorker(ULocalCharacterComponent* InOwner, const FLocalTalkerRuntimePaths& InPaths) : Owner(InOwner), Paths(InPaths) {}
+    FLocalTalkerTTSWorker(
+        TQueue<FString, EQueueMode::Mpsc>& InSentenceQueue,
+        TQueue<TArray<uint8>, EQueueMode::Mpsc>& InAudioQueue,
+        FThreadSafeBool& InStop,
+        ULocalCharacterComponent* InOwner,
+        const FLocalTalkerRuntimePaths& InPaths
+    )
+        : SentenceQueue(InSentenceQueue)
+        , AudioQueue(InAudioQueue)
+        , bStop(InStop)
+        , Owner(InOwner)
+        , Paths(InPaths)
+    {}
+
     virtual uint32 Run() override
     {
-        while (!Owner->bTTSStop)
+        while (!bStop)
         {
             FString Sentence;
-            if (Owner->SentenceQueue.Dequeue(Sentence))
+            if (!SentenceQueue.Dequeue(Sentence))
             {
-                FString Err;
-                Owner->RunPiperSentenceToAudioQueue(Sentence, Paths, Err);
-                if (!Err.IsEmpty())
-                {
-                    UE_LOG(LogLocalTalker, Warning, TEXT("[%s] Piper/TTS error: %s"), *Owner->GetSpeakerNameResolved(), *Err);
-                }
-                Owner->PendingSentenceCount.Decrement();
+                FPlatformProcess::Sleep(0.01f);
+                continue;
             }
-            FPlatformProcess::Sleep(0.01f);
+
+            if (bStop) break;
+            if (!Owner) break;
+
+            FString Err;
+            Owner->RunPiperSentenceToAudioQueue(Sentence, Paths, Err);
+            if (!Err.IsEmpty())
+            {
+                AsyncTask(ENamedThreads::GameThread, [Owner = Owner, Err]()
+                {
+                    if (Owner) Owner->OnError.Broadcast(Err);
+                });
+            }
+
+            // Mark this sentence as fully processed (either produced audio or errored).
+            Owner->PendingSentenceCount.Decrement();
         }
         return 0;
     }
+
+private:
+    TQueue<FString, EQueueMode::Mpsc>& SentenceQueue;
+    TQueue<TArray<uint8>, EQueueMode::Mpsc>& AudioQueue;
+    FThreadSafeBool& bStop;
+    ULocalCharacterComponent* Owner = nullptr;
+    FLocalTalkerRuntimePaths Paths;
 };
 
 void ULocalCharacterComponent::StartTTSWorker(const FLocalTalkerRuntimePaths& Paths)
 {
-    StopTTSWorker();
+    if (bTTSWorkerRunning) return;
+
+    bTTSWorkerRunning = true;
     bTTSStop = false;
-    TTSRunnable = new FLocalTalkerTTSWorker(this, Paths);
-    TTSThread = FRunnableThread::Create(TTSRunnable, TEXT("LocalTalkerTTS"));
+
+    TTSRunnable = new FLocalTalkerTTSWorker(SentenceQueue, AudioQueue, bTTSStop, this, Paths);
+    TTSThread = FRunnableThread::Create(TTSRunnable, TEXT("LocalTalkerTTSWorker"), 0, TPri_BelowNormal);
 }
 
 void ULocalCharacterComponent::StopTTSWorker()
 {
+    if (!bTTSWorkerRunning) return;
+
+    bTTSWorkerRunning = false;
     bTTSStop = true;
-    if (TTSThread) { TTSThread->WaitForCompletion(); delete TTSThread; TTSThread = nullptr; }
-    if (TTSRunnable) { delete TTSRunnable; TTSRunnable = nullptr; }
+
+    if (TTSThread)
+    {
+        TTSThread->WaitForCompletion();
+        delete TTSThread;
+        TTSThread = nullptr;
+    }
+
+    if (TTSRunnable)
+    {
+        delete TTSRunnable;
+        TTSRunnable = nullptr;
+    }
 }
 
 void ULocalCharacterComponent::RunPiperSentenceToAudioQueue(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, FString& OutErr)
 {
-    OutErr.Reset();
-
-    const FString PiperExe = Paths.PiperExePath;
-    const FString VoiceModel = Paths.PiperVoiceModelPath;
-
-    if (PiperExe.IsEmpty() || !FPaths::FileExists(PiperExe))
+    const FString VoicePath = ResolveVoiceOnnxPath();
+    if (Paths.PiperExePath.IsEmpty() || VoicePath.IsEmpty())
     {
-        OutErr = FString::Printf(TEXT("PiperExePath missing/invalid: %s"), *PiperExe);
-        return;
-    }
-    if (VoiceModel.IsEmpty() || !FPaths::FileExists(VoiceModel))
-    {
-        OutErr = FString::Printf(TEXT("PiperVoiceModelPath missing/invalid: %s"), *VoiceModel);
+        OutErr = TEXT("Piper paths not set. Configure Project Settings -> LocalTalker (PiperExePath + Voices).");
         return;
     }
 
-    // Write output wav to Saved/LocalTalker/tts/<guid>.wav
-    const FString OutDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("LocalTalker"), TEXT("tts"));
-    IFileManager::Get().MakeDirectory(*OutDir, true);
-    const FString WavPath = FPaths::Combine(OutDir, FString::Printf(TEXT("%s.wav"), *FGuid::NewGuid().ToString(EGuidFormats::Digits)));
+    UE_LOG(LogLocalTalker, Log, TEXT("[%s] Piper start: %s"), *GetSpeakerNameResolved(), *Sentence);
 
-    // Piper usage (common): echo "text" | piper --model <voice.onnx> --output_file <out.wav>
-    const FString Args = FString::Printf(TEXT("--model \"%s\" --output_file \"%s\""), *VoiceModel, *WavPath);
+    const FString TempDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("LocalTalker"));
+    IPlatformFile& PF = FPlatformFileManager::Get().GetPlatformFile();
+    PF.CreateDirectoryTree(*TempDir);
+
+    const FString OutWav = FPaths::Combine(TempDir, FString::Printf(TEXT("tts_%llu.wav"), (uint64)FPlatformTime::Cycles64()));
+
+    FString Args;
+    Args += TEXT("-m ") + QuoteArg3(VoicePath) + TEXT(" ");
+    Args += TEXT("-f ") + QuoteArg3(OutWav) + TEXT(" ");
 
     FProcHandle Handle;
     FLocalProcPipes Pipes;
-    FString SpawnErr;
-    if (!FLocalTalkerProcess::SpawnWithPipes(PiperExe, Args, Paths.WorkingDir, Handle, Pipes, SpawnErr))
+    FString SpawnError;
+
+    if (!FLocalTalkerProcess::SpawnWithPipes(Paths.PiperExePath, Args, Paths.WorkingDir, Handle, Pipes, SpawnError))
     {
-        OutErr = SpawnErr;
+        OutErr = SpawnError;
+        UE_LOG(LogLocalTalker, Error, TEXT("[%s] Piper spawn failed: %s"), *GetSpeakerNameResolved(), *OutErr);
         return;
     }
 
-    FString StdErrAccum;
-    auto OnOut = [](const FString& /*Out*/) {};
-    auto OnErr = [&StdErrAccum](const FString& Err) { StdErrAccum += Err; };
-
-    // Send sentence and close stdin so piper exits.
-    const FString Line = Sentence + TEXT("\n");
-    if (!FLocalTalkerProcess::WriteStdin(Pipes, Line))
+    FLocalTalkerProcess::WriteStdin(Pipes, Sentence + TEXT("\n"));
+    if (Pipes.WriteInPipe)
     {
-        StdErrAccum += TEXT("Failed to write to Piper stdin.\n");
-    }
-    // Close stdin pipes explicitly to signal EOF.
-    if (Pipes.ReadInPipe || Pipes.WriteInPipe)
-    {
-        FPlatformProcess::ClosePipe(Pipes.ReadInPipe, Pipes.WriteInPipe);
-        Pipes.ReadInPipe = nullptr;
+        FPlatformProcess::ClosePipe(nullptr, Pipes.WriteInPipe);
         Pipes.WriteInPipe = nullptr;
     }
 
-    FLocalTalkerProcess::PumpOutputUntilExit(Handle, Pipes, OnOut, OnErr, 0.01);
-    FPlatformProcess::WaitForProc(Handle);
+    FString StdErrAll;
+    auto OnErr = [&](const FString& Chunk) { StdErrAll += Chunk; };
+    auto OnOut = [&](const FString&) {};
+
+    FLocalTalkerProcess::PumpOutputUntilExit(Handle, Pipes, OnOut, OnErr, 0.005);
+
+    int32 ReturnCode = 0;
+    FPlatformProcess::GetProcReturnCode(Handle, &ReturnCode);
     FPlatformProcess::CloseProc(Handle);
     FLocalTalkerProcess::ClosePipes(Pipes);
 
-    if (!StdErrAccum.IsEmpty())
+    if (ReturnCode != 0)
     {
-        // Don't fail purely on stderr, but surface it if we also fail to load wav.
-        StdErrAccum = StdErrAccum.TrimStartAndEnd();
-    }
-
-    if (!FPaths::FileExists(WavPath))
-    {
-        OutErr = FString::Printf(TEXT("Piper did not produce wav. %s"), *StdErrAccum);
+        OutErr = FString::Printf(TEXT("piper failed (code %d). stderr:\n%s"), ReturnCode, *StdErrAll);
+        UE_LOG(LogLocalTalker, Error, TEXT("[%s] %s"), *GetSpeakerNameResolved(), *OutErr);
         return;
     }
 
-    FLocalWavPcm16 Wav;
+    FLocalWavPcm16 W;
     FString WavErr;
-    if (!FLocalTalkerWav::LoadWavPcm16(WavPath, Wav, WavErr))
+    if (!FLocalTalkerWav::LoadWavPcm16(OutWav, W, WavErr))
     {
-        OutErr = FString::Printf(TEXT("Failed to load wav '%s': %s. %s"), *WavPath, *WavErr, *StdErrAccum);
+        OutErr = WavErr;
+        UE_LOG(LogLocalTalker, Error, TEXT("[%s] WAV load failed: %s"), *GetSpeakerNameResolved(), *OutErr);
         return;
     }
 
-    // Convert PCM16 samples to bytes for USoundWaveProcedural::QueueAudio
-    FAudioChunk Chunk;
-    Chunk.SampleRate = Wav.SampleRate;
-    Chunk.NumChannels = Wav.NumChannels;
-    Chunk.Bytes.SetNumUninitialized(Wav.Samples.Num() * sizeof(int16));
-    FMemory::Memcpy(Chunk.Bytes.GetData(), Wav.Samples.GetData(), Chunk.Bytes.Num());
+    if (W.Samples.Num() == 0) return;
+
+    // Clean up the temp file ASAP; we have the audio in memory now.
+    PF.DeleteFile(*OutWav);
+
+    // Piper voices are typically mono, but handle basic stereo->mono downmix if needed.
+    int32 NumChannels = FMath::Max(1, W.NumChannels);
+    int32 SampleRate = FMath::Max(1, W.SampleRate);
+
+    TArray<int16> Mono;
+    const int32 TotalSamples = W.Samples.Num();
+    if (NumChannels == 2)
+    {
+        const int32 Frames = TotalSamples / 2;
+        Mono.SetNumUninitialized(Frames);
+        for (int32 i = 0; i < Frames; i++)
+        {
+            const int32 L = (int32)W.Samples[i * 2 + 0];
+            const int32 R = (int32)W.Samples[i * 2 + 1];
+            Mono[i] = (int16)((L + R) / 2);
+        }
+        NumChannels = 1;
+    }
+    else if (NumChannels != 1)
+    {
+        OutErr = FString::Printf(TEXT("Unsupported WAV channel count: %d (only mono/stereo supported)."), NumChannels);
+        return;
+    }
+
+    // Ensure procedural wave format matches.
+    AsyncTask(ENamedThreads::GameThread, [this, SampleRate, NumChannels]()
+    {
+        EnsureAudio();
+        EnsureProcWaveFormat(SampleRate, NumChannels);
+    });
+
+    const TArray<int16>& Use = (Mono.Num() > 0) ? Mono : W.Samples;
+    const float DurationSec = (SampleRate > 0 && NumChannels > 0)
+        ? ((float)Use.Num() / (float)(SampleRate * NumChannels))
+        : 0.0f;
+
+    if (bUseUESubtitles && DurationSec > 0.0f)
+    {
+        const PTRINT SubtitleId = (PTRINT)this;
+        const float Priority = UESubtitlePriority;
+        const FString Line = FString::Printf(TEXT("%s: %s"), *GetSpeakerNameResolved(), *Sentence);
+        TWeakObjectPtr<UWorld> WorldPtr = GetWorld();
+
+        AsyncTask(ENamedThreads::GameThread, [SubtitleId, Priority, DurationSec, Line, WorldPtr]()
+        {
+            UWorld* World = WorldPtr.Get();
+            if (!World) return;
+
+            TArray<FSubtitleCue> Cues;
+            FSubtitleCue Cue;
+            Cue.Text = FText::FromString(Line);
+            Cue.Time = 0.0f;
+            Cues.Add(Cue);
+
+            FSubtitleManager::GetSubtitleManager()->QueueSubtitles(
+                SubtitleId,
+                Priority,
+                /*bManualWordWrap*/ false,
+                /*bSingleLine*/ true,
+                DurationSec,
+                Cues,
+                /*InStartTime*/ 0.0f,
+                World->GetAudioTimeSeconds()
+            );
+        });
+    }
+
+    TArray<uint8> Bytes;
+    Bytes.SetNumUninitialized(Use.Num() * sizeof(int16));
+    FMemory::Memcpy(Bytes.GetData(), Use.GetData(), Bytes.Num());
 
     PendingAudioChunkCount.Increment();
-    AudioQueue.Enqueue(MoveTemp(Chunk));
-    LastAudioEnqueueCycles.Store(FPlatformTime::Cycles64());
+    AudioQueue.Enqueue(MoveTemp(Bytes));
+    bAudioQueueDrained = false;
 
-    // Best-effort cleanup
-    IFileManager::Get().Delete(*WavPath, false, true, true);
+    UE_LOG(LogLocalTalker, Log, TEXT("[%s] Piper ok: %d samples, %d ch, %d Hz (queued)"),
+        *GetSpeakerNameResolved(),
+        W.Samples.Num(),
+        NumChannels,
+        SampleRate
+    );
 }
+
+void ULocalCharacterComponent::PumpAudioToProcedural()
+{
+    EnsureAudio();
+
+    if (!AudioComp || !ProcWave) return;
+    if (bInterrupted) return;
+
+    TArray<uint8> Bytes;
+    bool bQueued = false;
+
+    for (int32 i = 0; i < 8; i++)
+    {
+        if (!AudioQueue.Dequeue(Bytes)) break;
+        if (Bytes.Num() == 0) continue;
+
+        ProcWave->QueueAudio(Bytes.GetData(), Bytes.Num());
+        bQueued = true;
+        PendingAudioChunkCount.Decrement();
+    }
+
+    if (bQueued && !bAudioStarted)
+    {
+        AudioComp->SetSound(ProcWave);
+        AudioComp->Play();
+        bAudioStarted = true;
+        UE_LOG(LogLocalTalker, Log, TEXT("[%s] Audio started (procedural)."), *GetSpeakerNameResolved());
+    }
+
+    if (AudioQueue.IsEmpty() && PendingAudioChunkCount.GetValue() == 0)
+    {
+        bAudioQueueDrained = true;
+    }
+}
+

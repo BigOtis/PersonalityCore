@@ -9,14 +9,18 @@ You must provide:
 - A GGUF model file (default recommended below)
 - A built libllama (dll + import lib) or static lib, plus headers, from llama.cpp
 
-## Default recommended model (small + permissive)
-Model family: TinyLlama-1.1B-Chat-v1.0 (Apache-2.0)
-Quantization: Q4_K_M (balanced, ~668MB)
+## Default recommended model
+Model family: Llama 3.2 3B (GGUF)
+Quantization: Q4_K_M (balanced, ~2.02GB)
 
-Filename (common): tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
+Filename:
+  Llama-3.2-3B-Q4_K_M.gguf
+
+Download:
+  https://huggingface.co/tensorblock/Llama-3.2-3B-GGUF/resolve/main/Llama-3.2-3B-Q4_K_M.gguf
 
 Example location:
-  C:\AI\models\tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
+  C:\AI\models\Llama-3.2-3B-Q4_K_M.gguf
 
 ## Building libllama on Windows
 1) Clone llama.cpp:

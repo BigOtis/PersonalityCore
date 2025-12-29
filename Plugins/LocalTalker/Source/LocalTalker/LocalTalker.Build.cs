@@ -102,7 +102,7 @@ public class LocalTalker : ModuleRules
             }
 
             // Default bundled artifacts (models/voices) - staged if present
-            string DefaultModel = Path.Combine(PluginDir, "Resources", "Models", "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf");
+            string DefaultModel = Path.Combine(PluginDir, "Resources", "Models", "Llama-3.2-3B-Q4_K_M.gguf");
             if (File.Exists(DefaultModel))
             {
                 RuntimeDependencies.Add(DefaultModel);

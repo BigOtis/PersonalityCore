@@ -1,0 +1,17 @@
+Llama 3.2 model license notice
+
+Default bundled model file (if present):
+- `Resources/Models/Llama-3.2-3B-Q4_K_M.gguf`
+
+Model source (example):
+- https://huggingface.co/tensorblock/Llama-3.2-3B-GGUF
+
+Llama 3.x model weights are distributed under Meta's Llama license terms (and may include additional terms/attribution requirements depending on the distributor and conversion process).
+
+Before distributing on Fab (or elsewhere), confirm the exact applicable license(s) for the specific GGUF you bundle (including any conversion/packaging terms from the source you downloaded it from) and replace this notice with:
+- the full applicable license text(s), and
+- any required attribution per the model’s repository card.
+
+
+
+

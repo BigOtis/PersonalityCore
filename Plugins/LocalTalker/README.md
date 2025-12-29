@@ -110,7 +110,7 @@ Or from the Unreal Editor:
 **"Model file is too small"**
 - Your `.gguf` file is likely a partial download or error page
 - Delete it and re-download from HuggingFace:
-  - [TinyLlama Q4_K_M](https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf) (~637 MB)
+  - [Llama 3.2 3B Q4_K_M (GGUF)](https://huggingface.co/tensorblock/Llama-3.2-3B-GGUF/resolve/main/Llama-3.2-3B-Q4_K_M.gguf) (~2.02 GB)
 
 **"MISSING: libllama.dll"**
 - Build llama.cpp or download a pre-built release
@@ -148,7 +148,7 @@ LocalTalker expects these files to exist (default "out of the box" locations):
   - `Plugins/LocalTalker/ThirdParty/llama/Win64/Release/ggml-cpu.dll`
   - `Plugins/LocalTalker/ThirdParty/llama/Win64/Release/ggml-vulkan.dll` (optional, for GPU)
 - **Default GGUF model**
-  - `Plugins/LocalTalker/Resources/Models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf`
+  - `Plugins/LocalTalker/Resources/Models/Llama-3.2-3B-Q4_K_M.gguf`
 - **Piper executable**
   - `Plugins/LocalTalker/ThirdParty/piper/Win64/Release/piper.exe`
 - **Default voice model**
@@ -156,7 +156,7 @@ LocalTalker expects these files to exist (default "out of the box" locations):
   - `Plugins/LocalTalker/Resources/Voices/en_US-lessac-small.onnx.json`
 
 **Download the model:**
-- [TinyLlama Q4_K_M](https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf) (~637 MB)
+- [Llama 3.2 3B Q4_K_M (GGUF)](https://huggingface.co/tensorblock/Llama-3.2-3B-GGUF/resolve/main/Llama-3.2-3B-Q4_K_M.gguf) (~2.02 GB)
 
 ### 3) Configure Project Settings (optional)
 
@@ -277,7 +277,8 @@ Access via Blueprint: `Get World Subsystem → Local Talk Conversation Subsystem
 
 The LLM uses a specialized prompt wrapper (`LocalTalkerInProcAsync::BuildPrompt`) that:
 
-1. **Matches the model's chat template** (TinyLlama uses Zephyr-style: `<|system|>`, `<|user|>`, `<|assistant|>`)
+1. **Matches the model's chat template** (LocalTalker uses a model-aware template: Llama 3.x uses `<|begin_of_text|>` / `<|start_header_id|>` / `<|eot_id|>`, while some other models use Zephyr-style tags)
+2. **Includes multi-character context**: prompts include a short **CAST BRIEFS** section (one-liners per speaker seen in the recent context) plus structured per-message speaker metadata, so each character stays consistent even in 3+ person conversations.
 2. **Includes clear output rules** in the system prompt:
    - Output only spoken dialogue (no speaker labels)
    - No control tokens or markup
@@ -447,7 +448,8 @@ Currently included:
 
 - `llama.cpp_LICENSE.txt`
 - `piper_LICENSE.txt`
-- `tinyllama_LICENSE_NOTICE.txt`
+- `llama3_2_LICENSE_NOTICE.txt`
+- `tinyllama_LICENSE_NOTICE.txt` (legacy)
 
 ---
 
@@ -462,7 +464,7 @@ Currently included:
 
 - Confirm the `.gguf` exists and the path is correct.
 - **Check file size** — the model should be hundreds of MB. If it's only a few MB, it's likely a corrupt/incomplete download.
-- Re-download from: [TinyLlama Q4_K_M](https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf)
+- Re-download from: [Llama 3.2 3B Q4_K_M (GGUF)](https://huggingface.co/tensorblock/Llama-3.2-3B-GGUF/resolve/main/Llama-3.2-3B-Q4_K_M.gguf)
 - **"no backends are loaded" error**: This indicates that llama.cpp backends (CPU/GPU) aren't being registered. Ensure:
   - `ggml-cpu.dll` is present and loads successfully
   - The llama.cpp DLLs were built with backend auto-registration enabled
