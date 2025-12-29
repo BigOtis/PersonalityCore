@@ -113,6 +113,7 @@ private:
     void UpdateContexts();
     void ProcessTurns();
     void MaintainKeepAlive();
+    void RefreshContextParticipants(FLocalConversationContext& Context);
 
     void EnqueueTurn(ULocalCharacterComponent* Talker, const FString& Prompt, double EarliestGrantWorldSeconds);
     

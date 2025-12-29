@@ -88,8 +88,11 @@ void ULocalTalkConversationSubsystem::RequestTurn(ULocalCharacterComponent* Talk
     const UWorld* W = GetWorld();
     const double Now = W ? (double)W->GetTimeSeconds() : 0.0;
 
-    // If it's a user prompt (not RAW and not an instruction), add to history
-    if (!Prompt.StartsWith(TEXT("RAW:")) && !Prompt.StartsWith(TEXT("Respond to ")))
+    // If it's a user prompt (not RAW and not a Director/internal instruction), add to history.
+    if (!Prompt.StartsWith(TEXT("RAW:")) &&
+        !Prompt.StartsWith(TEXT("Respond to ")) &&
+        !Prompt.StartsWith(TEXT("Director instruction:"), ESearchCase::IgnoreCase) &&
+        !Prompt.StartsWith(TEXT("Instruction:"), ESearchCase::IgnoreCase))
     {
         if (FLocalConversationContext* Context = FindOrCreateContext(Talker))
         {
@@ -224,18 +227,7 @@ void ULocalTalkConversationSubsystem::UpdateContexts()
     // 2. Refresh participants for each context based on proximity to context center
     for (auto& Context : ActiveContexts)
     {
-        Context.Participants.Empty();
-        for (auto& WeakAgent : Registry)
-        {
-            ULocalCharacterComponent* Agent = WeakAgent.Get();
-            if (!Agent || !Agent->GetOwner()) continue;
-
-            float Dist = FVector::Dist(Agent->GetOwner()->GetActorLocation(), Context.LastCenter);
-            if (Dist < Agent->ConversationRadius)
-            {
-                Context.Participants.Add(Agent);
-            }
-        }
+        RefreshContextParticipants(Context);
     }
 }
 
@@ -326,9 +318,8 @@ void ULocalTalkConversationSubsystem::MaintainKeepAlive()
         {
             const FLocalTalkMessage& LastMsg = Context.History.Last();
             Prompt = FString::Printf(
-                TEXT("Director instruction: Keep the conversation alive. Respond in-character to %s's last line, add a NEW concrete detail or viewpoint, avoid repeating their wording, and end with a fresh question. Last line: %s"),
-                *LastMsg.SpeakerName,
-                *LastMsg.Content
+                TEXT("Director instruction: Keep the conversation alive. Respond in-character to %s, add a NEW concrete detail or viewpoint, avoid repeating their wording, and end with a fresh question."),
+                *LastMsg.SpeakerName
             );
         }
         else
@@ -365,6 +356,7 @@ FLocalConversationContext* ULocalTalkConversationSubsystem::FindOrCreateContext(
     NewContext.LastInteractionTime = GetWorld()->GetTimeSeconds();
     NewContext.Participants.Add(Agent);
     int32 Index = ActiveContexts.Add(NewContext);
+    RefreshContextParticipants(ActiveContexts[Index]);
     return &ActiveContexts[Index];
 }
 
@@ -386,6 +378,8 @@ void ULocalTalkConversationSubsystem::AddMessageToContext(FLocalConversationCont
 
 void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationContext& Context, ULocalCharacterComponent* LastSpeaker)
 {
+    RefreshContextParticipants(Context);
+
     // Don't start a new turn if someone is still busy (LLM processing or TTS speaking)
     for (auto& Weak : Context.Participants)
     {
@@ -429,6 +423,7 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
 
     // Logic: Pick someone other than the last speaker to respond
     // In a more complex version, this could use priority, personality, etc.
+    bool bFoundCandidate = false;
     for (auto& Weak : Context.Participants)
     {
         ULocalCharacterComponent* Candidate = Weak.Get();
@@ -439,17 +434,63 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
             if (TimeSinceLast < 5.0f)
             {
                 const FString Prompt = FString::Printf(
-                    TEXT("Director instruction: Respond in-character to %s's last line. Add a NEW detail or viewpoint, do not echo their exact wording, and end with a natural follow-up question. Last line: %s"),
-                    *LastMsg.SpeakerName,
-                    *LastMsg.Content
+                    TEXT("Director instruction: Respond in-character to %s. Add a NEW detail or viewpoint, do not echo their exact wording, and end with a natural follow-up question."),
+                    *LastMsg.SpeakerName
                 );
                 UE_LOG(LogLocalTalker, Log, TEXT("[Director] -> TRIGGERING RESPONSE from '%s'"), *Candidate->GetSpeakerNameResolved());
                 // Queue as a normal turn, but delay granting so conversations don't machine-gun between NPCs.
                 const double Now = (double)GetWorld()->GetTimeSeconds();
                 const double Earliest = Now + (double)FMath::Max(0.0f, MinDelay);
                 EnqueueTurn(Candidate, Prompt, Earliest);
+                bFoundCandidate = true;
                 return;
             }
+        }
+    }
+
+    // Solo continuation: if only one participant exists and a player can hear, let them keep talking.
+    if (!bFoundCandidate &&
+        LastSpeaker &&
+        Context.Participants.Num() == 1 &&
+        Context.Participants[0].Get() == LastSpeaker &&
+        !LastMsg.bFromUser &&
+        bAllowNpcToNpc)
+    {
+        if (!bRequireListener || LocalTalkerIsAnyPlayerPawnInHearingRange(GetWorld(), Context))
+        {
+            if (!(MaxNpcTurns > 0 && Context.ConsecutiveNpcTurns > MaxNpcTurns))
+            {
+                const float TimeSinceLast = GetWorld()->GetTimeSeconds() - Context.LastInteractionTime;
+                if (TimeSinceLast < 5.0f)
+                {
+                    const FString Prompt = FString::Printf(
+                        TEXT("Director instruction: Continue speaking to the nearby listener. Add a NEW detail or viewpoint, do not echo your exact wording, and end with a natural question.")
+                    );
+                    UE_LOG(LogLocalTalker, Log, TEXT("[Director] -> TRIGGERING SOLO CONTINUATION from '%s'"), *LastSpeaker->GetSpeakerNameResolved());
+                    const double Now = (double)GetWorld()->GetTimeSeconds();
+                    const double Earliest = Now + (double)FMath::Max(0.0f, MinDelay);
+                    EnqueueTurn(LastSpeaker, Prompt, Earliest);
+                }
+            }
+        }
+    }
+}
+
+void ULocalTalkConversationSubsystem::RefreshContextParticipants(FLocalConversationContext& Context)
+{
+    Context.Participants.Empty();
+    for (auto& WeakAgent : Registry)
+    {
+        ULocalCharacterComponent* Agent = WeakAgent.Get();
+        if (!Agent || !Agent->GetOwner()) continue;
+
+        const float R = FMath::Max(0.0f, Agent->ConversationRadius);
+        if (R <= 0.0f) continue;
+
+        const float Dist = FVector::Dist(Agent->GetOwner()->GetActorLocation(), Context.LastCenter);
+        if (Dist <= R)
+        {
+            Context.Participants.Add(Agent);
         }
     }
 }

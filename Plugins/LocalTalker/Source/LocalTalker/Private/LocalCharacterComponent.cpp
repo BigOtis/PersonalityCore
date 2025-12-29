@@ -9,6 +9,7 @@
 #include "Async/Async.h"
 #include "Engine/Engine.h"
 #include "SubtitleManager.h"
+#include "Misc/FileHelper.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
 #include "Misc/PathViews.h"
@@ -36,6 +37,18 @@ static FString TrimSentence(const FString& In)
     return S;
 }
 
+static void LocalTalkerDumpPromptToFile(const FString& Speaker, const FString& Prompt)
+{
+    const FString Dir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("LocalTalker"), TEXT("LLMLogs"));
+    IPlatformFile& PF = FPlatformFileManager::Get().GetPlatformFile();
+    PF.CreateDirectoryTree(*Dir);
+
+    const FString SafeSpeaker = Speaker.IsEmpty() ? TEXT("Speaker") : Speaker;
+    const FString FileName = FString::Printf(TEXT("%s_%s_prompt.txt"), *FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S_%s")), *SafeSpeaker);
+    const FString Path = FPaths::Combine(Dir, FileName);
+
+    FFileHelper::SaveStringToFile(Prompt, *Path, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+}
 ULocalCharacterComponent::ULocalCharacterComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
@@ -109,6 +122,7 @@ void ULocalCharacterComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
     }
 
     PumpAudioToProcedural();
+    UpdateAudioCompletion();
 
     // Notify the Director when this turn is truly finished (LLM done + TTS jobs done + audio finished).
     // IMPORTANT: we must not ReleaseTurn while Piper is still generating audio (queues can look empty briefly).
@@ -330,6 +344,32 @@ static FString LocalTalkerJsonEscape(const FString& In)
     return S;
 }
 
+static void LocalTalkerStripControlTokens(FString& S)
+{
+    static const TCHAR* Tokens[] =
+    {
+        TEXT("<|assistant|>"),
+        TEXT("<|user|>"),
+        TEXT("<|system|>"),
+        TEXT("<|eot_id|>"),
+        TEXT("<|begin_of_text|>"),
+        TEXT("<|end_of_text|>"),
+        TEXT("<|start_header_id|>assistant<|end_header_id|>"),
+        TEXT("<|start_header_id|>user<|end_header_id|>"),
+        TEXT("<|start_header_id|>system<|end_header_id|>"),
+        TEXT("<|start_header_id|>"),
+        TEXT("<|end_header_id|>"),
+        TEXT("</s>"),
+        TEXT("[INST]"),
+        TEXT("[/INST]")
+    };
+
+    for (const TCHAR* T : Tokens)
+    {
+        S.ReplaceInline(T, TEXT(""));
+    }
+}
+
 static bool LocalTalkerTryExtractJsonStringField(const FString& In, const FString& Key, FString& OutValue)
 {
     // Best-effort: extract `"Key":"..."`
@@ -379,16 +419,62 @@ static bool LocalTalkerTryExtractJsonStringField(const FString& In, const FStrin
     return true;
 }
 
+static bool LocalTalkerTryExtractKeyLine(const FString& In, const FString& Key, FString& OutValue)
+{
+    TArray<FString> Lines;
+    In.ParseIntoArrayLines(Lines, true);
+
+    for (const FString& RawLine : Lines)
+    {
+        FString Line = RawLine;
+        Line.TrimStartAndEndInline();
+        if (!Line.StartsWith(Key, ESearchCase::IgnoreCase))
+        {
+            continue;
+        }
+
+        int32 Sep = Line.Find(TEXT("="));
+        if (Sep == INDEX_NONE)
+        {
+            Sep = Line.Find(TEXT(":"));
+        }
+        if (Sep == INDEX_NONE)
+        {
+            continue;
+        }
+
+        OutValue = Line.Mid(Sep + 1);
+        OutValue.TrimStartAndEndInline();
+        if (!OutValue.IsEmpty())
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static FString LocalTalkerCleanSpokenText(const FString& In)
 {
     FString S = TrimSentence(In);
     if (S.IsEmpty()) return S;
+
+    LocalTalkerStripControlTokens(S);
 
     // If the model echoed our structured metadata, try to extract the "text" field.
     if (S.StartsWith(TEXT("{")) || S.Contains(TEXT("\"text\"")))
     {
         FString Extracted;
         if (LocalTalkerTryExtractJsonStringField(S, TEXT("text"), Extracted))
+        {
+            S = Extracted;
+        }
+    }
+
+    // Extract from key/value style metadata: TEXT=... or Text: ...
+    {
+        FString Extracted;
+        if (LocalTalkerTryExtractKeyLine(S, TEXT("TEXT"), Extracted))
         {
             S = Extracted;
         }
@@ -432,6 +518,11 @@ static FString LocalTalkerCleanSpokenText(const FString& In)
         bStripped |= StripPrefix(TEXT("System:"));
         bStripped |= StripPrefix(TEXT("Director:"));
         bStripped |= StripPrefix(TEXT("NPC:"));
+        bStripped |= StripPrefix(TEXT("Speaker:"));
+        bStripped |= StripPrefix(TEXT("FromUser:"));
+        bStripped |= StripPrefix(TEXT("SPEAKER="));
+        bStripped |= StripPrefix(TEXT("FROM_USER="));
+        bStripped |= StripPrefix(TEXT("TEXT="));
 
         // Generic "Name:" prefix (single token up to 24 chars, no spaces) — catches "Milo:" / "Otis:" etc.
         int32 ColonIdx = S.Find(TEXT(":"), ESearchCase::IgnoreCase, ESearchDir::FromStart);
@@ -446,13 +537,36 @@ static FString LocalTalkerCleanSpokenText(const FString& In)
             }
         }
 
+        auto StripBracketPrefix = [&S](TCHAR Open, TCHAR Close) -> bool
+        {
+            if (S.Len() < 3) return false;
+            if (S[0] != Open) return false;
+            const int32 CloseIdx = S.Find(FString::Chr(Close), ESearchCase::IgnoreCase, ESearchDir::FromStart, 1);
+            if (CloseIdx <= 0 || CloseIdx > 32) return false;
+
+            const FString Label = S.Mid(1, CloseIdx - 1);
+            if (Label.Contains(TEXT(" ")) || Label.Contains(TEXT("\t")))
+            {
+                return false;
+            }
+
+            S = S.Mid(CloseIdx + 1);
+            S.TrimStartAndEndInline();
+            return true;
+        };
+
+        bStripped |= StripBracketPrefix(TEXT('['), TEXT(']'));
+        bStripped |= StripBracketPrefix(TEXT('('), TEXT(')'));
+
         if (!bStripped) break;
     }
 
     // Drop common "metadata-only" junk.
     if (S.Equals(TEXT("Speaker:"), ESearchCase::IgnoreCase) ||
         S.StartsWith(TEXT("Speaker:"), ESearchCase::IgnoreCase) ||
-        S.StartsWith(TEXT("FromUser:"), ESearchCase::IgnoreCase))
+        S.StartsWith(TEXT("FromUser:"), ESearchCase::IgnoreCase) ||
+        S.StartsWith(TEXT("SPEAKER="), ESearchCase::IgnoreCase) ||
+        S.StartsWith(TEXT("FROM_USER="), ESearchCase::IgnoreCase))
     {
         // If it's just those headers with no actual dialogue, ignore it completely.
         const FString One = LocalTalkerOneLine(S);
@@ -460,7 +574,9 @@ static FString LocalTalkerCleanSpokenText(const FString& In)
             One.Equals(TEXT("Speaker: User"), ESearchCase::IgnoreCase) ||
             One.Equals(TEXT("Speaker: Director"), ESearchCase::IgnoreCase) ||
             One.StartsWith(TEXT("Speaker:"), ESearchCase::IgnoreCase) ||
-            One.StartsWith(TEXT("FromUser:"), ESearchCase::IgnoreCase))
+            One.StartsWith(TEXT("FromUser:"), ESearchCase::IgnoreCase) ||
+            One.StartsWith(TEXT("SPEAKER="), ESearchCase::IgnoreCase) ||
+            One.StartsWith(TEXT("FROM_USER="), ESearchCase::IgnoreCase))
         {
             return FString();
         }
@@ -523,16 +639,31 @@ static FString LocalTalkerBuildLlama3PromptFromContext(
     // ---- System ----
     FString SystemBlock;
     SystemBlock += FString::Printf(TEXT("You are %s.\n\n"), *SelfSpeakerName);
+    if (!SelfSpeakerName.IsEmpty())
+    {
+        SystemBlock += FString::Printf(TEXT("You are speaking now as %s. Only output %s's spoken dialogue.\n\n"), *SelfSpeakerName, *SelfSpeakerName);
+    }
 
-    // Cast briefs for everyone who has talked (based on the context history speaker list).
+    // Cast briefs for everyone in the conversation (participants + speakers in history).
     {
         TSet<FString> Seen;
         TArray<FString> Speakers;
-        // Keep a stable order: self first, then speakers in first-appearance order.
+        // Keep a stable order: self first, then context participants, then speakers in first-appearance order.
         if (!SelfSpeakerName.IsEmpty())
         {
             Seen.Add(SelfSpeakerName);
             Speakers.Add(SelfSpeakerName);
+        }
+        for (ULocalCharacterComponent* P : ContextParticipants)
+        {
+            if (!P) continue;
+            const FString Name = P->GetSpeakerNameResolved();
+            if (Name.IsEmpty()) continue;
+            if (!Seen.Contains(Name))
+            {
+                Seen.Add(Name);
+                Speakers.Add(Name);
+            }
         }
         for (const FLocalTalkMessage& M : ContextHistory)
         {
@@ -598,8 +729,13 @@ static FString LocalTalkerBuildLlama3PromptFromContext(
         TEXT("- Always move the conversation forward; add a NEW concrete detail or viewpoint.\n")
         TEXT("- Do not echo the last line verbatim.\n")
         TEXT("- Output only the spoken dialogue (no speaker labels, no transcripts). Never output lines like \"User:\", \"Assistant:\", or \"Name:\".\n")
+        TEXT("- Do not refer to yourself as Assistant, AI, or a language model.\n")
+        TEXT("- Do not output bracketed speaker tags like \"[Milo]\" or \"(Otis)\".\n")
         TEXT("- Do not output any control tokens or markup.\n")
-        TEXT("- Speak in 2–4 complete sentences unless asked for shorter.\n");
+        TEXT("- Never restate the cast briefs, directions, or character descriptions; they are reference only.\n")
+        TEXT("- Do not describe yourself or your role; just speak as if in the scene.\n")
+        TEXT("- If unsure, ask a short, in-character question about the current situation.\n")
+        TEXT("- Speak in 2-4 complete sentences unless asked for shorter.\n");
 
     // ---- History ----
     // Prefer last N messages and also respect MaxContextChars (approx, content-only) so prompts don't balloon.
@@ -634,40 +770,38 @@ static FString LocalTalkerBuildLlama3PromptFromContext(
     Prompt += TEXT("<|begin_of_text|>");
     AppendTurn(Prompt, TEXT("system"), SystemBlock);
 
+    // Consolidate conversation history into a single transcript block to avoid role confusion.
+    FString Transcript;
+    Transcript += TEXT("CONVERSATION SO FAR (most recent last):\n");
+    bool bHasHistory = false;
     for (int32 i = StartIdx; i < ContextHistory.Num(); i++)
     {
         const FLocalTalkMessage& M = ContextHistory[i];
         const FString Clean = LocalTalkerOneLine(M.Content);
         if (Clean.IsEmpty()) continue;
 
-        const bool bIsSelf = (!SelfSpeakerName.IsEmpty() && M.SpeakerName.Equals(SelfSpeakerName, ESearchCase::IgnoreCase));
-        if (bIsSelf)
-        {
-            AppendTurn(Prompt, TEXT("assistant"), Clean + TEXT("\n\n"));
-        }
-        else
-        {
-            const FString Speaker = M.SpeakerName.IsEmpty() ? TEXT("Unknown") : M.SpeakerName;
-            const bool bUserish = M.bFromUser || Speaker.Equals(TEXT("User"), ESearchCase::IgnoreCase);
-            if (bUserish)
-            {
-                // For true user input, avoid adding any "User:" prefix — Llama will often mirror it.
-                AppendTurn(Prompt, TEXT("user"), Clean + TEXT("\n\n"));
-            }
-            else
-            {
-                // For other speakers, keep it unambiguous but avoid "Name:" transcript formatting.
-                AppendTurn(Prompt, TEXT("user"), FString::Printf(TEXT("[%s] %s\n\n"), *Speaker, *Clean));
-            }
-        }
+        const FString Speaker = M.bFromUser ? TEXT("Player") : (M.SpeakerName.IsEmpty() ? TEXT("Unknown") : M.SpeakerName);
+        Transcript += FString::Printf(TEXT("%s: %s\n"), *Speaker, *Clean);
+        bHasHistory = true;
     }
+    if (!bHasHistory)
+    {
+        Transcript += TEXT("(no prior conversation)\n");
+    }
+    Transcript += TEXT("\n");
 
-    // ---- Turn instruction (Director / internal) ----
     if (!TurnPrompt.IsEmpty() && (TurnPrompt.StartsWith(TEXT("Director instruction:"), ESearchCase::IgnoreCase) || TurnPrompt.StartsWith(TEXT("Respond to "), ESearchCase::IgnoreCase)))
     {
         const FString Clean = LocalTalkerOneLine(TurnPrompt);
-        AppendTurn(Prompt, TEXT("user"), FString::Printf(TEXT("Instruction (do not repeat): %s\n\n"), *Clean));
+        Transcript += FString::Printf(TEXT("DIRECTOR INSTRUCTION (do not repeat): %s\n\n"), *Clean);
     }
+
+    if (!SelfSpeakerName.IsEmpty())
+    {
+        Transcript += FString::Printf(TEXT("You are now speaking as %s. Write only %s's next spoken line, no name prefix.\n"), *SelfSpeakerName, *SelfSpeakerName);
+    }
+
+    AppendTurn(Prompt, TEXT("user"), Transcript);
 
     // Generation prompt
     Prompt += TEXT("<|start_header_id|>assistant<|end_header_id|>\n\n");
@@ -789,6 +923,15 @@ FLocalTalkerCharacterConfig ULocalCharacterComponent::ResolveConfig() const
 
     Out.bSpeak = CharacterConfigOverride.bSpeak;
     Out.bStreamTokens = CharacterConfigOverride.bStreamTokens;
+
+    if (Out.Stop.IsEmpty())
+    {
+        const FLocalTalkerRuntimePaths Paths = ResolvePaths();
+        if (LocalTalkerModelLooksLikeLlama3(Paths.LlamaModelPath))
+        {
+            Out.Stop = TEXT("<|eot_id|>");
+        }
+    }
 
     return Out;
 }
@@ -945,6 +1088,8 @@ void ULocalCharacterComponent::InternalGrantTurn(const FString& PromptOrText)
     {
         PromptText = BuildPromptWithHistory(Config, PromptOrText);
     }
+
+    LocalTalkerDumpPromptToFile(GetSpeakerNameResolved(), PromptText);
 
     ActiveLLM = ULocalTalkerInProcGenerateAsync::GenerateStreamingInProcWithPromptText(this, Paths, Config, PromptText);
     ActiveLLM->OnToken.AddDynamic(this, &ULocalCharacterComponent::HandleLLMToken);
@@ -1341,6 +1486,18 @@ void ULocalCharacterComponent::PumpAudioToProcedural()
         ProcWave->QueueAudio(Bytes.GetData(), Bytes.Num());
         bQueued = true;
         PendingAudioChunkCount.Decrement();
+
+        if (UWorld* W = GetWorld())
+        {
+            const int32 SampleRate = ProcWave->GetSampleRateForCurrentPlatform();
+            const int32 NumChannels = FMath::Max(1, ProcWave->NumChannels);
+            const double Duration = (SampleRate > 0)
+                ? (static_cast<double>(Bytes.Num()) / (2.0 * NumChannels * SampleRate))
+                : 0.0;
+            const double Now = W->GetTimeSeconds();
+            const double Base = FMath::Max(EstimatedAudioEndWorldSeconds, Now);
+            EstimatedAudioEndWorldSeconds = Base + Duration;
+        }
     }
 
     if (bQueued && !bAudioStarted)
@@ -1357,3 +1514,29 @@ void ULocalCharacterComponent::PumpAudioToProcedural()
     }
 }
 
+void ULocalCharacterComponent::UpdateAudioCompletion()
+{
+    if (!AudioComp || !ProcWave) return;
+    if (!bAudioStarted) return;
+    if (!bAudioQueueDrained) return;
+    if (!bLLMFinished) return;
+
+    if (!AudioComp->IsPlaying())
+    {
+        EstimatedAudioEndWorldSeconds = 0.0;
+        bAudioStarted = false;
+        return;
+    }
+
+    if (UWorld* W = GetWorld())
+    {
+        const double Now = W->GetTimeSeconds();
+        if (EstimatedAudioEndWorldSeconds > 0.0 &&
+            Now >= (EstimatedAudioEndWorldSeconds + TurnReleaseAudioTailSeconds))
+        {
+            AudioComp->Stop();
+            bAudioStarted = false;
+            EstimatedAudioEndWorldSeconds = 0.0;
+        }
+    }
+}

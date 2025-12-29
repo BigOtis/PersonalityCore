@@ -154,7 +154,13 @@ public:
     void OnHeardSpeech(const FString& InSpeakerName, const FString& Text, bool bFromUser);
 
     /** Returns true if this agent is currently speaking or processing LLM/TTS. */
-    bool IsBusy() const { return bIsSpeakingInternal || (bLLMFinished == false && ActiveLLM != nullptr); }
+    bool IsBusy() const
+    {
+        const bool bLLMBusy = (bLLMFinished == false && ActiveLLM != nullptr);
+        const bool bTTSBusy = (PendingSentenceCount.GetValue() > 0) || (PendingAudioChunkCount.GetValue() > 0);
+        const bool bAudioPlaying = (AudioComp != nullptr) && AudioComp->IsPlaying();
+        return bIsSpeakingInternal || bLLMBusy || bTTSBusy || bAudioPlaying;
+    }
 
 protected:
     virtual void BeginPlay() override;
@@ -228,6 +234,7 @@ private:
     void EnqueueSentence(const FString& Sentence);
     void ExtractAndEnqueueSentences(bool bForceFlush);
     void PumpAudioToProcedural();
+    void UpdateAudioCompletion();
     FString BuildPromptWithHistory(const FLocalTalkerCharacterConfig& Config, const FString& UserText) const;
     void EmitSubtitle(const FString& Text);
     void DebugPrintLine(const FString& Line, float Seconds, bool bNewLine) const;

@@ -151,9 +151,11 @@ static FString BuildPrompt(const FLocalTalkerRuntimePaths& P, const FLocalTalker
         TEXT("- Always move the conversation forward: add a new detail, opinion, or observation.\n")
         TEXT("- Do not echo or translate the last line verbatim.\n")
         TEXT("- Output only the spoken dialogue. Do not include speaker labels (no \"User:\", \"Assistant:\", \"Name:\", or any prefix like \"Some Role:\").\n")
+        TEXT("- Do not refer to yourself as Assistant, AI, or a language model.\n")
+        TEXT("- Do not output bracketed speaker tags like \"[Milo]\" or \"(Otis)\".\n")
         TEXT("- Do not output any markup or control tokens (no <|system|>, <|user|>, <|assistant|>, </s>, [INST], [/INST]).\n")
         TEXT("- Use normal spacing between words and standard punctuation.\n")
-        TEXT("- Speak in 2–4 complete sentences unless the user asks for something shorter.\n")
+        TEXT("- Speak in 2-4 complete sentences unless the user asks for something shorter.\n")
         TEXT("- Avoid meta commentary (no \"as an AI\", no narration like \"he says\", no stage directions).\n");
 
     if (LocalTalkerModelLooksLikeLlama3(P.LlamaModelPath))
