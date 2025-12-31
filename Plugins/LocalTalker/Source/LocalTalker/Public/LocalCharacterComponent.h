@@ -33,60 +33,60 @@ public:
     ULocalCharacterComponent();
 
     // --- Configuration ---
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
+    UPROPERTY(EditAnywhere, Category="LocalTalker")
     FLocalTalkerRuntimePaths PathsOverride;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
+    UPROPERTY(EditAnywhere, Category="LocalTalker")
     bool bUseProjectSettingsPaths = true;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
+    UPROPERTY(EditAnywhere, Category="LocalTalker")
     FLocalTalkerCharacterConfig CharacterConfigOverride;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
+    UPROPERTY(EditAnywhere, Category="LocalTalker")
     bool bUseProjectSettingsConfig = true;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Streaming TTS")
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Streaming TTS")
     int32 MinCharsBeforeSpeak = 24;
 
     // If true, the component will begin TTS while tokens stream in (sentence-chunking).
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Streaming TTS")
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Streaming TTS")
     bool bSpeakStreaming = true;
 
     // Safety cap to avoid unbounded buffering if the model doesn't emit terminators.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Streaming TTS", meta=(ClampMin="16"))
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Streaming TTS", meta=(ClampMin="16"))
     int32 MaxSentenceChars = 240;
 
     // Procedural audio can keep "playing" with a silent tail; this controls how quickly we force-stop it
     // once we know no more chunks are coming, so the Director can hand off the turn promptly.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Streaming TTS", meta=(ClampMin="0.0"))
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Streaming TTS", meta=(ClampMin="0.0"))
     float TurnReleaseAudioTailSeconds = 0.20f;
 
     // If true, uses UE SubtitleManager to display subtitles (otherwise only fires events / debug).
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Subtitles")
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Subtitles")
     bool bUseUESubtitles = true;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Subtitles")
     FString SpeakerName;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Subtitles")
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Subtitles")
     bool bShowOnScreenSubtitles = true;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Conversation")
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Conversation")
     float ConversationRadius = 1500.0f;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Prompt")
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Prompt")
     FString Directions;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Prompt")
     FString Desc;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Debug")
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Debug")
     bool bTraceConversation = false;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Debug")
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Debug")
     bool bDebugPrintGeneratedText = false;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Debug")
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Debug")
     bool bDebugLogTokens = false;
 
     // --- Events ---

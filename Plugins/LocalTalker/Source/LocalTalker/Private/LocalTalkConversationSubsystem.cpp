@@ -362,6 +362,18 @@ FLocalConversationContext* ULocalTalkConversationSubsystem::FindOrCreateContext(
 
 void ULocalTalkConversationSubsystem::AddMessageToContext(FLocalConversationContext& Context, const FString& Speaker, const FString& Text, bool bFromUser)
 {
+    if (Context.History.Num() > 0)
+    {
+        const FLocalTalkMessage& Last = Context.History.Last();
+        if (Last.bFromUser == bFromUser &&
+            Last.SpeakerName.Equals(Speaker, ESearchCase::IgnoreCase) &&
+            Last.Content.Equals(Text, ESearchCase::IgnoreCase))
+        {
+            Context.LastInteractionTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+            return;
+        }
+    }
+
     Context.History.Add({ Speaker, Text, bFromUser });
     if (Context.History.Num() > 10) Context.History.RemoveAt(0);
     Context.LastInteractionTime = GetWorld()->GetTimeSeconds();

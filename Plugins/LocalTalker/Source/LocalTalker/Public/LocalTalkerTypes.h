@@ -44,17 +44,17 @@ struct FLocalTalkerCharacterConfig
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
     // Dialogue is intended to be short (one line). Keep this modest to reduce loops and long stalls.
-    int32 MaxTokens = 192;
+    int32 MaxTokens = 64;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
-    float Temperature = 0.65f;
+    float Temperature = 0.40f;
 
     // --- Sampling controls (best-practice defaults for chatty dialogue without echo loops) ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0"))
     int32 TopK = 40;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0.0", ClampMax="1.0"))
-    float TopP = 0.90f;
+    float TopP = 0.88f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0.0", ClampMax="1.0"))
     float MinP = 0.05f; // 0 disables min-p
@@ -68,19 +68,23 @@ struct FLocalTalkerCharacterConfig
     int32 RepeatLastN = 128;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="1.0"))
-    float RepeatPenalty = 1.12f; // 1.0 disables
+    float RepeatPenalty = 1.15f; // 1.0 disables
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0.0"))
-    float FrequencyPenalty = 0.10f; // 0 disables
+    float FrequencyPenalty = 0.14f; // 0 disables
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0.0"))
-    float PresencePenalty = 0.10f; // 0 disables
+    float PresencePenalty = 0.06f; // 0 disables
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
     int32 Seed = 0;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
     FString Stop; // Empty by default - let model generate naturally, we'll clean output post-processing
+
+    // Optional multi-stop support. If provided, overrides Stop.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
+    TArray<FString> StopSequences;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
     bool bSpeak = true;

@@ -38,13 +38,13 @@ static FString LocalTalkerNormalizeTokenPiece(FString Piece)
     return Piece;
 }
 
-static bool LocalTalkerShouldStopEarly(const FString& FullOut)
+static bool LocalTalkerShouldStopEarly(const FString& FullOut, bool bTaggedPrompt)
 {
     // Deterministic "dialogue mode" stopping rules:
     // - Stop at first newline
     // - Stop after a reasonable one-line length
     // - Prefer to end on punctuation once the line is already fairly long (prevents rambling)
-    if (FullOut.Contains(TEXT("\n")) || FullOut.Contains(TEXT("\r")))
+    if (!bTaggedPrompt && (FullOut.Contains(TEXT("\n")) || FullOut.Contains(TEXT("\r"))))
     {
         return true;
     }
@@ -132,31 +132,27 @@ static FString BuildPrompt(const FLocalTalkerRuntimePaths& P, const FLocalTalker
     const FString Directions = !C.Directions.IsEmpty() ? C.Directions : C.SystemPrompt;
     const FString Desc = !C.CharacterDescription.IsEmpty() ? C.CharacterDescription : C.Persona;
 
-    FString SystemBlock;
-    if (!Directions.IsEmpty())
-    {
-        SystemBlock += Directions.TrimStartAndEnd();
-    }
-    if (!Desc.IsEmpty())
-    {
-        if (!SystemBlock.IsEmpty()) SystemBlock += TEXT("\n\n");
-        SystemBlock += Desc.TrimStartAndEnd();
-    }
+    const FString SpeakerTag = TEXT("SPEAKER");
 
-    if (!SystemBlock.IsEmpty()) SystemBlock += TEXT("\n\n");
-    SystemBlock +=
-        TEXT("RULES:\n")
-        TEXT("- Stay strictly in character at all times.\n")
-        TEXT("- Keep continuity with the conversation so far; do not change subjects abruptly.\n")
-        TEXT("- Always move the conversation forward: add a new detail, opinion, or observation.\n")
-        TEXT("- Do not echo or translate the last line verbatim.\n")
-        TEXT("- Output only the spoken dialogue. Do not include speaker labels (no \"User:\", \"Assistant:\", \"Name:\", or any prefix like \"Some Role:\").\n")
-        TEXT("- Do not refer to yourself as Assistant, AI, or a language model.\n")
-        TEXT("- Do not output bracketed speaker tags like \"[Milo]\" or \"(Otis)\".\n")
-        TEXT("- Do not output any markup or control tokens (no <|system|>, <|user|>, <|assistant|>, </s>, [INST], [/INST]).\n")
-        TEXT("- Use normal spacing between words and standard punctuation.\n")
-        TEXT("- Speak in 2-4 complete sentences unless the user asks for something shorter.\n")
-        TEXT("- Avoid meta commentary (no \"as an AI\", no narration like \"he says\", no stage directions).\n");
+    FString SystemBlock;
+    SystemBlock += TEXT("You are the current speaker.\n\n");
+    SystemBlock += TEXT("You must output EXACTLY ONE message from the speaker and nothing else.\n\n");
+    SystemBlock += TEXT("Output format (must match exactly):\n");
+    SystemBlock += FString::Printf(TEXT("[%s] <dialogue> [/%s]\n\n"), *SpeakerTag, *SpeakerTag);
+    SystemBlock += TEXT("Rules:\n");
+    SystemBlock += FString::Printf(TEXT("- Your reply MUST begin with [%s] and end with [/%s].\n"), *SpeakerTag, *SpeakerTag);
+    SystemBlock += TEXT("- Output only that single tagged block. No extra text before or after.\n");
+    SystemBlock += FString::Printf(TEXT("- Do not output any other tags besides [%s] ... [/%s].\n"), *SpeakerTag, *SpeakerTag);
+    SystemBlock += TEXT("- No narration, no actions, no stage directions.\n");
+    SystemBlock += TEXT("- 1-3 sentences, natural and specific.\n");
+    SystemBlock += TEXT("- Include exactly ONE concrete detail from the scene or context.\n");
+    SystemBlock += TEXT("- Do not repeat or paraphrase the last line.\n");
+    SystemBlock += TEXT("- Do not reuse any full sentence from the transcript.\n");
+    SystemBlock += TEXT("- Do not reuse any 5+ word sequence from the transcript.\n");
+    SystemBlock += TEXT("- If your draft matches any earlier line, discard it and write a different reply.\n");
+    SystemBlock += TEXT("- Do not ask the same question twice; ask a new question with new wording.\n");
+
+    // Keep system strictly for role + output rules. Character details belong in the user block.
 
     if (LocalTalkerModelLooksLikeLlama3(P.LlamaModelPath))
     {
@@ -167,9 +163,17 @@ static FString BuildPrompt(const FLocalTalkerRuntimePaths& P, const FLocalTalker
         Prompt += SystemBlock;
         Prompt += TEXT("\n<|eot_id|>\n");
         Prompt += TEXT("<|start_header_id|>user<|end_header_id|>\n");
-        Prompt += UserPrompt.TrimStartAndEnd();
+        Prompt += TEXT("Character Descriptions:\n");
+        Prompt += TEXT("- Speaker: ");
+        Prompt += Desc.IsEmpty() ? TEXT("(no description provided)") : Desc.TrimStartAndEnd();
+        Prompt += TEXT("\n\n");
+        Prompt += TEXT("[TRANSCRIPT]\n");
+        Prompt += TEXT("[/TRANSCRIPT]\n\n");
+        Prompt += TEXT("No transcript yet. Say a brief greeting to start the conversation.\n\n");
+        Prompt += TEXT("Next speaker must be [SPEAKER].\n");
+        Prompt += TEXT("What would the speaker say next? Output only in the required [SPEAKER] ... [/SPEAKER] format.\n");
         Prompt += TEXT("\n<|eot_id|>\n");
-        Prompt += TEXT("<|start_header_id|>assistant<|end_header_id|>\n");
+        Prompt += TEXT("<|start_header_id|>assistant<|end_header_id|>\n\n");
         return Prompt;
     }
 
@@ -234,6 +238,7 @@ void ULocalTalkerInProcGenerateAsync::Activate()
     const FLocalTalkerRuntimePaths P = Paths;
     const FLocalTalkerCharacterConfig C = Character;
     const FString Prompt = bPromptIsFull ? PromptText : BuildPrompt(P, C, UserPrompt);
+    const bool bTaggedPrompt = Prompt.Contains(TEXT("[SPEAKER]")) && Prompt.Contains(TEXT("[/SPEAKER]"));
 
     const double ActivateStart = FPlatformTime::Seconds();
     if (CVarLocalTalkerTraceConversation_InProc.GetValueOnAnyThread() != 0)
@@ -251,7 +256,7 @@ void ULocalTalkerInProcGenerateAsync::Activate()
         );
     }
 
-    Async(EAsyncExecution::ThreadPool, [this, P, C, Prompt, ActivateStart]()
+    Async(EAsyncExecution::ThreadPool, [this, P, C, Prompt, ActivateStart, bTaggedPrompt]()
     {
         const double Start = FPlatformTime::Seconds();
         if (P.LlamaLibPath.IsEmpty())
@@ -289,7 +294,7 @@ void ULocalTalkerInProcGenerateAsync::Activate()
         const int32 Cores = FMath::Max(1, FPlatformMisc::NumberOfCoresIncludingHyperthreads());
         CParams.n_threads = Cores;
         CParams.n_threads_batch = Cores;
-        CParams.n_ctx = 2048;
+        CParams.n_ctx = 4096;
         CParams.n_batch = 512;
         CParams.abort_callback = &LocalTalkerAbortCb;
         CParams.abort_callback_data = (void*)&bCancel;
@@ -448,6 +453,24 @@ void ULocalTalkerInProcGenerateAsync::Activate()
         }
 
         FString FullOut;
+        TArray<FString> StopSequences = C.StopSequences;
+        if (StopSequences.Num() == 0 && !C.Stop.IsEmpty())
+        {
+            StopSequences.Add(C.Stop);
+        }
+        if (StopSequences.Num() == 0 && bTaggedPrompt)
+        {
+            StopSequences.Add(TEXT("<|eot_id|>"));
+            StopSequences.Add(TEXT("[/SPEAKER]"));
+            StopSequences.Add(TEXT("\n[PLAYER]"));
+            StopSequences.Add(TEXT("\n[SPEAKER]"));
+            StopSequences.Add(TEXT("\nNext speaker must be"));
+            StopSequences.Add(TEXT("\n[TRANSCRIPT]"));
+            StopSequences.Add(TEXT("\n[/TRANSCRIPT]"));
+            StopSequences.Add(TEXT("\nWhat would "));
+            StopSequences.Add(TEXT("\n<|start_header_id|>"));
+            StopSequences.Add(TEXT("\n<|begin_of_text|>"));
+        }
 
         for (int32 i = 0; i < C.MaxTokens; i++)
         {
@@ -527,20 +550,31 @@ void ULocalTalkerInProcGenerateAsync::Activate()
                 DispatchToken(this, Piece);
                 DispatchDelta(this, Piece);
 
-                if (LocalTalkerShouldStopEarly(FullOut))
+                if (LocalTalkerShouldStopEarly(FullOut, bTaggedPrompt))
                 {
                     break;
                 }
 
-                // Check stop sequence only if configured (empty by default now)
-                if (!C.Stop.IsEmpty() && FullOut.Contains(C.Stop))
+                // Check stop sequences only if configured
+                if (StopSequences.Num() > 0)
                 {
-                    const int32 Cut = FullOut.Find(C.Stop);
-                    if (Cut != INDEX_NONE)
+                    int32 BestIdx = INDEX_NONE;
+                    int32 BestLen = 0;
+                    for (const FString& Stop : StopSequences)
                     {
-                        FullOut = FullOut.Left(Cut);
+                        if (Stop.IsEmpty()) continue;
+                        const int32 Idx = FullOut.Find(Stop);
+                        if (Idx != INDEX_NONE && (BestIdx == INDEX_NONE || Idx < BestIdx))
+                        {
+                            BestIdx = Idx;
+                            BestLen = Stop.Len();
+                        }
                     }
-                    break;
+                    if (BestIdx != INDEX_NONE)
+                    {
+                        FullOut = FullOut.Left(BestIdx);
+                        break;
+                    }
                 }
             }
 
