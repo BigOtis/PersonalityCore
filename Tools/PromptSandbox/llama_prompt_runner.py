@@ -33,20 +33,22 @@ DEFAULT_CHARACTERS = [
     ),
     Character(
         name="Otis",
-        desc="A friendly security guard.",
-        directions="Be calm, polite, observant, and helpful. Ask clarifying questions naturally.",
+        desc="A calm, polite, observant security guard who is suspicious of what Milo is trying to do here at the museum.",
+        directions="Be calm, polite, observant, and slightly suspicious. Keep it natural and concise.",
     ),
 ]
 
 DEFAULT_HISTORY = [
-    Message(speaker="Player", text="Hello Buddy", from_user=True),
-    Message(speaker="Milo", text="Hey, what brings you here tonight?"),
-    Message(speaker="Otis", text="Evening. Anything I can help you with?"),
+    Message(speaker="Milo", text="I'm here to case the joint. I hear they've got some real good art in there."),
+    Message(speaker="Otis", text="Oh, it's you! Do you want a tour? Or do you have an appointment?"),
+    Message(speaker="Otis", text="Follow me upstairs. We'll go up."),
+    Message(speaker="Milo", text="Okay, but keep your eyes on my tail."),
+    Message(speaker="Milo", text="Haha, I've got you. Now give me all of the jewels!"),
 ]
 
-MODEL_PATH = r"C:\Users\Phil Lopez\Documents\Unreal Projects\AutoChat\Plugins\LocalTalker\Resources\Models\Llama-3.2-3B-Q4_K_M.gguf"
+MODEL_PATH = r"C:\Users\Phil Lopez\Documents\Unreal Projects\AutoChat\Plugins\LocalTalker\Resources\Models\Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
 
-N_CTX = 2048
+N_CTX = 1024
 N_THREADS = 4
 N_GPU_LAYERS = 0
 
@@ -55,7 +57,6 @@ DEFAULT_TEMPERATURE = 0.65
 DEFAULT_TOP_P = 0.90
 DEFAULT_TOP_K = 40
 DEFAULT_REPEAT_PENALTY = 1.12
-DEFAULT_REPEAT_LAST_N = 128
 DEFAULT_FREQUENCY_PENALTY = 0.08
 DEFAULT_PRESENCE_PENALTY = 0.08
 
@@ -141,6 +142,18 @@ def build_transcript(history: List[Message], max_lines: int = 20) -> str:
     return "\n".join(lines)
 
 
+def build_tagged_transcript(history: List[Message], max_lines: int = 20) -> str:
+    lines = []
+    for m in history[-max_lines:]:
+        speaker = "PLAYER" if m.from_user else (m.speaker or "UNKNOWN")
+        tag = speaker.upper()
+        t = one_line(m.text)
+        if not t:
+            continue
+        lines.append(f"[{tag}] {t} [/{tag}]")
+    return "\n".join(lines)
+
+
 def pick_last_non_self(history: List[Message], self_name: str) -> Optional[Message]:
     sn = (self_name or "").strip().lower()
     for m in reversed(history):
@@ -200,32 +213,59 @@ def build_messages_for_turn(
         spk = "Player" if last_other.from_user else (last_other.speaker or "Unknown")
         last_other_line = f"{spk}: {one_line(last_other.text)}"
 
-    system = (
-        f"You are {speaker}. Stay in character.\n"
-        "You are writing spoken dialogue in a realistic conversation.\n"
-        "Do not write narration, stage directions, thoughts, headings, or lists.\n"
-        "Do not mention prompts, rules, or being an AI.\n"
-        "Keep it natural and specific. 1-3 sentences.\n"
-        "Do not repeat or paraphrase the last two spoken lines.\n"
-        "Do not speak for other characters.\n"
-        "Include one concrete detail from the scene (sound, object, movement, or place).\n"
-    )
+    if speaker.lower() == "otis":
+        system = (
+            "You are Otis, a calm, polite, observant security guard who is suspicious of what Milo is trying to do here at the museum.\n"
+            "You must output EXACTLY ONE message from Otis and nothing else.\n"
+            "\n"
+            "Output format (must match exactly):\n"
+            "[OTIS] <Otis dialogue> [/OTIS]\n"
+            "\n"
+            "Rules:\n"
+            "- Your reply MUST begin with [OTIS] and end with [/OTIS].\n"
+            "- Output only that single tagged block. No extra text before or after.\n"
+            "- Do not output any other tags besides [OTIS] ... [/OTIS].\n"
+            "- Never use [PLAYER] or [MILO] tags in your output.\n"
+            "- No narration, no actions, no stage directions.\n"
+            "- 1-3 sentences, natural and specific.\n"
+            "- Include exactly ONE concrete detail from the scene.\n"
+            "- Use exactly one of these details: the camera hum, the locked glass display case, or the quiet corridor.\n"
+            "- Do not repeat or paraphrase Otis's last line.\n"
+        )
+    else:
+        system = (
+            f"You are {speaker}. Stay in character.\n"
+            "You are writing spoken dialogue in a realistic conversation.\n"
+            "Do not write narration, stage directions, thoughts, headings, or lists.\n"
+            "Do not mention prompts, rules, or being an AI.\n"
+            "Keep it natural and specific. 1-3 sentences.\n"
+            "Do not repeat or paraphrase the last two spoken lines.\n"
+            "Do not speak for other characters.\n"
+            "Include one concrete detail from the scene (sound, object, movement, or place).\n"
+        )
     if persona.strip():
         system += persona.strip() + "\n"
     if directions.strip():
         system += directions.strip() + "\n"
 
     user = ""
-    if scene.strip():
-        user += f"Scene: {one_line(scene)}\n"
-    if cast:
-        user += f"Cast briefs: {cast}\n"
-    user += "Transcript so far:\n"
-    user += build_transcript(hist, max_lines=20) + "\n\n"
-    user += f"Recent lines (do not repeat/paraphrase):\n{recent_block}\n\n"
-    if last_other_line:
-        user += f"Reply to the last message (do not quote it): {last_other_line}\n"
-    user += "Respond now."
+    if speaker.lower() == "otis":
+        if scene.strip():
+            user += f"Scene detail: {one_line(scene)}\n\n"
+        user += build_tagged_transcript(hist, max_lines=20) + "\n\n"
+        user += "Next speaker must be [OTIS].\n"
+        user += "What would Otis say next? Output only in the required [OTIS] ... [/OTIS] format."
+    else:
+        if scene.strip():
+            user += f"Scene: {one_line(scene)}\n"
+        if cast:
+            user += f"Cast briefs: {cast}\n"
+        user += "Transcript so far:\n"
+        user += build_transcript(hist, max_lines=20) + "\n\n"
+        user += f"Recent lines (do not repeat/paraphrase):\n{recent_block}\n\n"
+        if last_other_line:
+            user += f"Reply to the last message (do not quote it): {last_other_line}\n"
+        user += "Respond now."
 
     return [
         {"role": "system", "content": system.strip()},
@@ -239,6 +279,11 @@ def minimal_clean_output(text: str, speaker: str) -> str:
         return ""
     # very light cleanup only
     t = t.replace("\r", "\n").strip()
+    if speaker.lower() == "otis":
+        start = t.find("[OTIS]")
+        end = t.find("[/OTIS]")
+        if start != -1 and end != -1 and end > start:
+            return t[start : end + len("[/OTIS]")].strip()
     # if the model included "Speaker:" prefix, strip it
     if t.lower().startswith(speaker.lower() + ":"):
         t = t[len(speaker) + 1 :].lstrip()
@@ -264,7 +309,6 @@ def call_chat(
     top_p: float,
     top_k: int,
     repeat_penalty: float,
-    repeat_last_n: int,
     frequency_penalty: float,
     presence_penalty: float,
     stop: List[str],
@@ -279,7 +323,6 @@ def call_chat(
         top_p=top_p,
         top_k=top_k,
         repeat_penalty=repeat_penalty,
-        repeat_last_n=repeat_last_n,
         frequency_penalty=frequency_penalty,
         presence_penalty=presence_penalty,
         stop=stop,
@@ -349,6 +392,17 @@ def generate_turn(
         stop.append(f"\n{n}:")
         stop.append(f"{n}:")
     stop.append("<|start_header_id|>")
+    if speaker.lower() == "otis":
+        stop.extend(
+            [
+                "\n[MILO]",
+                "\n[PLAYER]",
+                "\n[TRANSCRIPT]",
+                "\n[/TRANSCRIPT]",
+                "\nWhat would Otis say next?",
+                "\n<|begin_of_text|>",
+            ]
+        )
 
     if args.log:
         print("\n" + "=" * 90)
@@ -368,7 +422,6 @@ def generate_turn(
         top_p=args.top_p,
         top_k=args.top_k,
         repeat_penalty=args.repeat_penalty,
-        repeat_last_n=args.repeat_last_n,
         frequency_penalty=args.frequency_penalty,
         presence_penalty=args.presence_penalty,
         stop=stop,
@@ -400,7 +453,6 @@ def generate_turn(
             top_p=args.top_p,
             top_k=args.top_k,
             repeat_penalty=max(args.repeat_penalty, 1.10),
-            repeat_last_n=args.repeat_last_n,
             frequency_penalty=args.frequency_penalty,
             presence_penalty=args.presence_penalty,
             stop=stop,
@@ -418,13 +470,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Multi-turn dialogue using llama-cpp-python chat completion and Llama 3 templates.")
     ap.add_argument("--turns", type=int, default=10)
     ap.add_argument("--start", default="Milo")
-    ap.add_argument("--scene", default="A quiet museum corridor at night; faint camera hum; a locked glass display case nearby.")
+    ap.add_argument("--scene", default="A quiet museum corridor at night, faint camera hum, and a locked glass display case nearby.")
     ap.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     ap.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE)
     ap.add_argument("--top-p", type=float, default=DEFAULT_TOP_P)
     ap.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     ap.add_argument("--repeat-penalty", type=float, default=DEFAULT_REPEAT_PENALTY)
-    ap.add_argument("--repeat-last-n", type=int, default=DEFAULT_REPEAT_LAST_N)
     ap.add_argument("--frequency-penalty", type=float, default=DEFAULT_FREQUENCY_PENALTY)
     ap.add_argument("--presence-penalty", type=float, default=DEFAULT_PRESENCE_PENALTY)
     ap.add_argument("--max-history", type=int, default=20)

@@ -84,7 +84,7 @@ public:
     TArray<FLocalTalkMessage> GetContextHistory(ULocalCharacterComponent* Agent);
 
     /** Gets the current participants for the context this agent belongs to. */
-    TArray<ULocalCharacterComponent*> GetContextParticipants(ULocalCharacterComponent* Agent);
+    TArray<ULocalCharacterComponent*> GetContextParticipants(const ULocalCharacterComponent* Agent) const;
 
     /** Clears the history for the context this agent belongs to. */
     void ClearContextHistory(ULocalCharacterComponent* Agent);

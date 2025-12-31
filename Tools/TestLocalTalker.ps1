@@ -31,7 +31,7 @@ $ggmlDll   = Join-Path $llamaDir "ggml.dll"
 $ggmlVulkan = Join-Path $llamaDir "ggml-vulkan.dll"
 $benchExe = Join-Path $llamaDir "llama-bench.exe"
 
-$model     = Join-Path $modelsDir "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+$model     = Join-Path $modelsDir "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
 
 $piperExe  = Join-Path $piperDir "piper.exe"
 $voiceOnnx = Join-Path $voicesDir "en_US-lessac-small.onnx"

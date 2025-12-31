@@ -41,7 +41,7 @@ public:
 
     // Optional pacing: the Director won't auto-trigger until at least this much time has passed since the last message.
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Conversation", meta=(ClampMin="0.0"))
-    float MinSecondsBetweenAutoReplies = 0.35f;
+    float MinSecondsBetweenAutoReplies = 0.10f;
 
     // Keep conversations alive indefinitely: if a context goes quiet, the Director will auto-trigger
     // a new turn after MaxSilenceSeconds (even if the last message is old).
@@ -59,4 +59,9 @@ public:
     // How long a context must be inactive before we delete it. If keep-alive is enabled, contexts are not cleaned up.
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Conversation", meta=(ClampMin="0.0"))
     float ContextCleanupSeconds = 30.0f;
+
+    // When DefaultCharacterConfig.GpuLayers is 0 (auto), cap the number of GPU layers to avoid VRAM exhaustion.
+    // Set to 0 to allow full offload.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Performance", meta=(ClampMin="0"))
+    int32 AutoGpuLayerCap = 24;
 };

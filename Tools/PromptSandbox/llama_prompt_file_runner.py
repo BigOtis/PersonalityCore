@@ -3,7 +3,7 @@ import os
 import sys
 from llama_cpp import Llama, LlamaGrammar
 
-MODEL_PATH = r"C:\Users\Phil Lopez\Documents\Unreal Projects\AutoChat\Plugins\LocalTalker\Resources\Models\Llama-3.2-3B-Q4_K_M.gguf"
+MODEL_PATH = r"C:\Users\Phil Lopez\Documents\Unreal Projects\AutoChat\Plugins\LocalTalker\Resources\Models\Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
 N_CTX = 4096
 N_THREADS = 4
 N_GPU_LAYERS = 0

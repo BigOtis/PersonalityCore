@@ -59,7 +59,7 @@ public:
     // Procedural audio can keep "playing" with a silent tail; this controls how quickly we force-stop it
     // once we know no more chunks are coming, so the Director can hand off the turn promptly.
     UPROPERTY(EditAnywhere, Category="LocalTalker|Streaming TTS", meta=(ClampMin="0.0"))
-    float TurnReleaseAudioTailSeconds = 0.20f;
+    float TurnReleaseAudioTailSeconds = 0.05f;
 
     // If true, uses UE SubtitleManager to display subtitles (otherwise only fires events / debug).
     UPROPERTY(EditAnywhere, Category="LocalTalker|Subtitles")
@@ -124,6 +124,12 @@ public:
 
     FString GetSpeakerNameResolved() const;
     bool IsAudioPlaying() const { return AudioComp && AudioComp->IsPlaying(); }
+    bool IsGenerationBusy() const
+    {
+        const bool bLLMBusy = (bLLMFinished == false && ActiveLLM != nullptr);
+        const bool bTTSBusy = (PendingSentenceCount.GetValue() > 0) || (PendingAudioChunkCount.GetValue() > 0);
+        return bIsSpeakingInternal || bLLMBusy || bTTSBusy;
+    }
 
 #if WITH_EDITOR
     // Test Helpers
@@ -156,10 +162,7 @@ public:
     /** Returns true if this agent is currently speaking or processing LLM/TTS. */
     bool IsBusy() const
     {
-        const bool bLLMBusy = (bLLMFinished == false && ActiveLLM != nullptr);
-        const bool bTTSBusy = (PendingSentenceCount.GetValue() > 0) || (PendingAudioChunkCount.GetValue() > 0);
-        const bool bAudioPlaying = (AudioComp != nullptr) && AudioComp->IsPlaying();
-        return bIsSpeakingInternal || bLLMBusy || bTTSBusy || bAudioPlaying;
+        return IsGenerationBusy() || ((AudioComp != nullptr) && AudioComp->IsPlaying());
     }
 
 protected:
@@ -226,6 +229,7 @@ private:
     // Game-thread estimate of when the currently queued procedural audio should finish playing (world seconds).
     // Used to avoid force-stopping real speech while still allowing us to recover if the audio component gets "stuck playing" on a silent tail.
     double EstimatedAudioEndWorldSeconds = 0.0;
+    double PendingAudioDurationSeconds = 0.0;
 
     void EnsureAudio();
     void EnsureProcWaveFormat(int32 SampleRate, int32 NumChannels);
@@ -235,6 +239,7 @@ private:
     void ExtractAndEnqueueSentences(bool bForceFlush);
     void PumpAudioToProcedural();
     void UpdateAudioCompletion();
+    bool IsAudioBlockedByOtherSpeaker() const;
     FString BuildPromptWithHistory(const FLocalTalkerCharacterConfig& Config, const FString& UserText) const;
     void EmitSubtitle(const FString& Text);
     void DebugPrintLine(const FString& Line, float Seconds, bool bNewLine) const;

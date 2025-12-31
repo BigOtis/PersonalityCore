@@ -1,5 +1,6 @@
 #include "LocalTalkerLlamaCache.h"
 #include "LocalTalkerLog.h"
+#include "LocalTalkerSettings.h"
 
 #include "HAL/PlatformFileManager.h"
 #include "Misc/Paths.h"
@@ -162,7 +163,20 @@ bool FLocalTalkerLlamaCache::Acquire(
             UE_LOG(LogLocalTalker, Warning, TEXT("GPU backend DLL found but GPU offload is not functional (vulkan-1.dll may be missing or drivers not installed). Falling back to CPU."));
         }
 
-        ResolvedGpuLayers = bEnable ? 999 : 0;
+        if (bEnable)
+        {
+            const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>();
+            const int32 AutoCap = S ? S->AutoGpuLayerCap : 0;
+            ResolvedGpuLayers = (AutoCap > 0) ? AutoCap : 999;
+            if (AutoCap > 0)
+            {
+                UE_LOG(LogLocalTalker, Log, TEXT("Auto GPU layer cap applied: %d"), AutoCap);
+            }
+        }
+        else
+        {
+            ResolvedGpuLayers = 0;
+        }
     }
 
     const FString ModelKey = FString::Printf(TEXT("%s|gpu=%d|backend=%d"), *ModelPath, ResolvedGpuLayers, (int32)Backend);
@@ -237,5 +251,3 @@ void FLocalTalkerLlamaCache::Shutdown()
     Api.Unload();
     LoadedDllPath.Reset();
 }
-
-

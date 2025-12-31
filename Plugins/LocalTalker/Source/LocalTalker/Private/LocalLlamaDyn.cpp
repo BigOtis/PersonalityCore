@@ -8,6 +8,11 @@
 
 static FARPROC GetSym(HMODULE Lib, const char* Name) { return ::GetProcAddress(Lib, Name); }
 
+#if PLATFORM_WINDOWS
+#pragma warning(push)
+#pragma warning(disable: 4191) // FARPROC to typed function pointer casts for GetProcAddress.
+#endif
+
 template <typename T>
 static bool LoadFn(HMODULE Lib, const char* Name, T& OutFn, FString& OutErr)
 {
@@ -33,6 +38,10 @@ static bool LoadOptionalFn(HMODULE Lib, const char* Name, T& OutFn)
     OutFn = reinterpret_cast<T>(P);
     return true;
 }
+
+#if PLATFORM_WINDOWS
+#pragma warning(pop)
+#endif
 
 bool FLocalLlamaApi::Load(const FString& DllPath, FString& OutErr)
 {

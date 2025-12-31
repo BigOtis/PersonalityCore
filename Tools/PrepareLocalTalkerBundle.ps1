@@ -125,7 +125,7 @@ Write-Host ""
 # 4) Default bundled model/voice
 #
 Write-Host "Step 4: Default model + voice"
-Download-If $DefaultGgufUrl (Join-Path $modelsDir "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf") | Out-Null
+Download-If $DefaultGgufUrl (Join-Path $modelsDir "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf") | Out-Null
 Download-If $DefaultVoiceOnnxUrl (Join-Path $voicesDir "en_US-lessac-small.onnx") | Out-Null
 Download-If $DefaultVoiceJsonUrl (Join-Path $voicesDir "en_US-lessac-small.onnx.json") | Out-Null
 Write-Host ""

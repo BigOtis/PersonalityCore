@@ -6,6 +6,16 @@
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
 
+static FString LocalTalkerTimePrefix(const UObject* Obj)
+{
+    const UWorld* W = Obj ? Obj->GetWorld() : nullptr;
+    if (!W)
+    {
+        return TEXT("");
+    }
+    return FString::Printf(TEXT("[t=%.2f] "), W->GetTimeSeconds());
+}
+
 static bool LocalTalkerIsAnyPlayerPawnInHearingRange(const UWorld* World, const FLocalConversationContext& Context)
 {
     if (!World) return false;
@@ -42,7 +52,7 @@ static bool LocalTalkerIsAnyPlayerPawnInHearingRange(const UWorld* World, const 
 void ULocalTalkConversationSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
-    UE_LOG(LogLocalTalker, Log, TEXT("[Director] Conversation Subsystem Initialized."));
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] Conversation Subsystem Initialized."), *LocalTalkerTimePrefix(this));
 }
 
 TStatId ULocalTalkConversationSubsystem::GetStatId() const
@@ -64,7 +74,8 @@ void ULocalTalkConversationSubsystem::RegisterTalker(ULocalCharacterComponent* T
 {
     if (!Talker) return;
     Registry.Add(Talker);
-    UE_LOG(LogLocalTalker, Log, TEXT("[Director] Registered: '%s' (Total: %d)"), 
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] Registered: '%s' (Total: %d)"),
+        *LocalTalkerTimePrefix(this),
         *Talker->GetSpeakerNameResolved(), Registry.Num());
 }
 
@@ -78,7 +89,7 @@ void ULocalTalkConversationSubsystem::UnregisterTalker(ULocalCharacterComponent*
     // Remove from manual queue if they were waiting
     ManualQueue.RemoveAll([Talker](const FQueuedTurn& T) { return T.Talker.Get() == Talker; });
 
-    UE_LOG(LogLocalTalker, Log, TEXT("[Director] Unregistered: '%s'"), *Name);
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] Unregistered: '%s'"), *LocalTalkerTimePrefix(this), *Name);
 }
 
 void ULocalTalkConversationSubsystem::RequestTurn(ULocalCharacterComponent* Talker, const FString& Prompt)
@@ -125,7 +136,8 @@ void ULocalTalkConversationSubsystem::EnqueueTurn(ULocalCharacterComponent* Talk
     NewTurn.EarliestGrantWorldSeconds = EarliestGrantWorldSeconds;
     ManualQueue.Add(MoveTemp(NewTurn));
     
-    UE_LOG(LogLocalTalker, Log, TEXT("[Director] '%s' requested turn (Manual Queue length: %d)"), 
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] '%s' requested turn (Manual Queue length: %d)"),
+        *LocalTalkerTimePrefix(this),
         *Talker->GetSpeakerNameResolved(), ManualQueue.Num());
 }
 
@@ -133,7 +145,9 @@ void ULocalTalkConversationSubsystem::ReleaseTurn(ULocalCharacterComponent* Talk
 {
     if (!Talker) return;
     
-    UE_LOG(LogLocalTalker, Log, TEXT("[Director] '%s' finished talking."), *Talker->GetSpeakerNameResolved());
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] '%s' finished talking."),
+        *LocalTalkerTimePrefix(this),
+        *Talker->GetSpeakerNameResolved());
 
     // If the talker didn't emit any speech this turn, do NOT auto-trigger a response.
     // This prevents infinite ping-pong when an LLM/TTS path fails and characters immediately "finish".
@@ -157,7 +171,7 @@ void ULocalTalkConversationSubsystem::BroadcastSentence(ULocalCharacterComponent
     if (!Context) return;
 
     FString SpeakerName = Speaker->GetSpeakerNameResolved();
-    UE_LOG(LogLocalTalker, Log, TEXT("[Director] %s: %s"), *SpeakerName, *Text);
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] %s: %s"), *LocalTalkerTimePrefix(this), *SpeakerName, *Text);
 
     AddMessageToContext(*Context, SpeakerName, Text, bFromUser);
 
@@ -181,10 +195,10 @@ TArray<FLocalTalkMessage> ULocalTalkConversationSubsystem::GetContextHistory(ULo
     return TArray<FLocalTalkMessage>();
 }
 
-TArray<ULocalCharacterComponent*> ULocalTalkConversationSubsystem::GetContextParticipants(ULocalCharacterComponent* Agent)
+TArray<ULocalCharacterComponent*> ULocalTalkConversationSubsystem::GetContextParticipants(const ULocalCharacterComponent* Agent) const
 {
     TArray<ULocalCharacterComponent*> Out;
-    if (FLocalConversationContext* Context = FindOrCreateContext(Agent))
+    if (FLocalConversationContext* Context = const_cast<ULocalTalkConversationSubsystem*>(this)->FindOrCreateContext(const_cast<ULocalCharacterComponent*>(Agent)))
     {
         for (const TWeakObjectPtr<ULocalCharacterComponent>& Weak : Context->Participants)
         {
@@ -259,7 +273,7 @@ void ULocalTalkConversationSubsystem::MaintainKeepAlive()
         {
             if (ULocalCharacterComponent* P = Weak.Get())
             {
-                if (P->IsBusy())
+                if (P->IsGenerationBusy() || P->IsAudioPlaying())
                 {
                     bAnyBusy = true;
                     break;
@@ -397,8 +411,8 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
     {
         if (ULocalCharacterComponent* P = Weak.Get())
         {
-            if (P->IsBusy()) return;
-        }
+        if (P->IsGenerationBusy()) return;
+    }
     }
 
     if (Context.History.Num() <= 0)
@@ -439,7 +453,7 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
     for (auto& Weak : Context.Participants)
     {
         ULocalCharacterComponent* Candidate = Weak.Get();
-        if (Candidate && Candidate != LastSpeaker && !Candidate->IsBusy())
+        if (Candidate && Candidate != LastSpeaker && !Candidate->IsGenerationBusy() && !Candidate->IsAudioPlaying())
         {
             // Only respond if the last message was within a reasonable timeframe
             const float TimeSinceLast = GetWorld()->GetTimeSeconds() - Context.LastInteractionTime;
@@ -449,7 +463,9 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
                     TEXT("Director instruction: Respond in-character to %s. Add a NEW detail or viewpoint, do not echo their exact wording, and end with a natural follow-up question."),
                     *LastMsg.SpeakerName
                 );
-                UE_LOG(LogLocalTalker, Log, TEXT("[Director] -> TRIGGERING RESPONSE from '%s'"), *Candidate->GetSpeakerNameResolved());
+                UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] -> TRIGGERING RESPONSE from '%s'"),
+                    *LocalTalkerTimePrefix(this),
+                    *Candidate->GetSpeakerNameResolved());
                 // Queue as a normal turn, but delay granting so conversations don't machine-gun between NPCs.
                 const double Now = (double)GetWorld()->GetTimeSeconds();
                 const double Earliest = Now + (double)FMath::Max(0.0f, MinDelay);
@@ -478,7 +494,9 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
                     const FString Prompt = FString::Printf(
                         TEXT("Director instruction: Continue speaking to the nearby listener. Add a NEW detail or viewpoint, do not echo your exact wording, and end with a natural question.")
                     );
-                    UE_LOG(LogLocalTalker, Log, TEXT("[Director] -> TRIGGERING SOLO CONTINUATION from '%s'"), *LastSpeaker->GetSpeakerNameResolved());
+                    UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] -> TRIGGERING SOLO CONTINUATION from '%s'"),
+                        *LocalTalkerTimePrefix(this),
+                        *LastSpeaker->GetSpeakerNameResolved());
                     const double Now = (double)GetWorld()->GetTimeSeconds();
                     const double Earliest = Now + (double)FMath::Max(0.0f, MinDelay);
                     EnqueueTurn(LastSpeaker, Prompt, Earliest);
@@ -528,7 +546,7 @@ void ULocalTalkConversationSubsystem::ProcessTurns()
             continue;
         }
 
-        if (T->IsBusy()) continue;
+        if (T->IsGenerationBusy() || T->IsAudioPlaying()) continue;
 
         // Check if ANYONE in this talker's context is busy
         bool bContextBusy = false;
@@ -538,7 +556,7 @@ void ULocalTalkConversationSubsystem::ProcessTurns()
             {
                 if (ULocalCharacterComponent* P = Weak.Get())
                 {
-                    if (P->IsBusy())
+                    if (P->IsGenerationBusy())
                     {
                         bContextBusy = true;
                         break;
@@ -553,7 +571,9 @@ void ULocalTalkConversationSubsystem::ProcessTurns()
             ManualQueue.RemoveAt(i);
             i--;
 
-            UE_LOG(LogLocalTalker, Log, TEXT("[Director] -> GRANTING TURN to: '%s'"), *T->GetSpeakerNameResolved());
+            UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] -> GRANTING TURN to: '%s'"),
+                *LocalTalkerTimePrefix(this),
+                *T->GetSpeakerNameResolved());
             T->InternalGrantTurn(Prompt);
         }
     }

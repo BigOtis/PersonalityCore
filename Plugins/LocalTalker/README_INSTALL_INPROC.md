@@ -10,17 +10,17 @@ You must provide:
 - A built libllama (dll + import lib) or static lib, plus headers, from llama.cpp
 
 ## Default recommended model
-Model family: Llama 3.2 3B (GGUF)
-Quantization: Q4_K_M (balanced, ~2.02GB)
+Model family: Llama 3.1 8B Instruct (GGUF)
+Quantization: Q4_K_M (balanced, ~4.9GB)
 
 Filename:
-  Llama-3.2-3B-Q4_K_M.gguf
+  Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
 
 Download:
-  https://huggingface.co/tensorblock/Llama-3.2-3B-GGUF/resolve/main/Llama-3.2-3B-Q4_K_M.gguf
+  https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
 
 Example location:
-  C:\AI\models\Llama-3.2-3B-Q4_K_M.gguf
+  C:\AI\models\Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
 
 ## Building libllama on Windows
 1) Clone llama.cpp:

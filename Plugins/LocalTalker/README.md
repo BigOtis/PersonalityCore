@@ -110,7 +110,7 @@ Or from the Unreal Editor:
 **"Model file is too small"**
 - Your `.gguf` file is likely a partial download or error page
 - Delete it and re-download from HuggingFace:
-  - [Llama 3.2 3B Q4_K_M (GGUF)](https://huggingface.co/tensorblock/Llama-3.2-3B-GGUF/resolve/main/Llama-3.2-3B-Q4_K_M.gguf) (~2.02 GB)
+  - [Meta Llama 3.1 8B Instruct Q4_K_M (GGUF)](https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf) (~4.9 GB)
 
 **"MISSING: libllama.dll"**
 - Build llama.cpp or download a pre-built release
@@ -148,7 +148,7 @@ LocalTalker expects these files to exist (default "out of the box" locations):
   - `Plugins/LocalTalker/ThirdParty/llama/Win64/Release/ggml-cpu.dll`
   - `Plugins/LocalTalker/ThirdParty/llama/Win64/Release/ggml-vulkan.dll` (optional, for GPU)
 - **Default GGUF model**
-  - `Plugins/LocalTalker/Resources/Models/Llama-3.2-3B-Q4_K_M.gguf`
+  - `Plugins/LocalTalker/Resources/Models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf`
 - **Piper executable**
   - `Plugins/LocalTalker/ThirdParty/piper/Win64/Release/piper.exe`
 - **Default voice model**
@@ -156,7 +156,7 @@ LocalTalker expects these files to exist (default "out of the box" locations):
   - `Plugins/LocalTalker/Resources/Voices/en_US-lessac-small.onnx.json`
 
 **Download the model:**
-- [Llama 3.2 3B Q4_K_M (GGUF)](https://huggingface.co/tensorblock/Llama-3.2-3B-GGUF/resolve/main/Llama-3.2-3B-Q4_K_M.gguf) (~2.02 GB)
+- [Meta Llama 3.1 8B Instruct Q4_K_M (GGUF)](https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf) (~4.9 GB)
 
 ### 3) Configure Project Settings (optional)
 
@@ -448,7 +448,7 @@ Currently included:
 
 - `llama.cpp_LICENSE.txt`
 - `piper_LICENSE.txt`
-- `llama3_2_LICENSE_NOTICE.txt`
+- `llama3_1_LICENSE_NOTICE.txt`
 - `tinyllama_LICENSE_NOTICE.txt` (legacy)
 
 ---
@@ -464,7 +464,7 @@ Currently included:
 
 - Confirm the `.gguf` exists and the path is correct.
 - **Check file size** — the model should be hundreds of MB. If it's only a few MB, it's likely a corrupt/incomplete download.
-- Re-download from: [Llama 3.2 3B Q4_K_M (GGUF)](https://huggingface.co/tensorblock/Llama-3.2-3B-GGUF/resolve/main/Llama-3.2-3B-Q4_K_M.gguf)
+- Re-download from: [Meta Llama 3.1 8B Instruct Q4_K_M (GGUF)](https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf)
 - **"no backends are loaded" error**: This indicates that llama.cpp backends (CPU/GPU) aren't being registered. Ensure:
   - `ggml-cpu.dll` is present and loads successfully
   - The llama.cpp DLLs were built with backend auto-registration enabled

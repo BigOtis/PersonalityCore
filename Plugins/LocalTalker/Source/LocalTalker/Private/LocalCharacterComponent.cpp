@@ -16,6 +16,16 @@
 #include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformTime.h"
 
+static FString LocalTalkerTimePrefix(const UObject* Obj)
+{
+    const UWorld* W = Obj ? Obj->GetWorld() : nullptr;
+    if (!W)
+    {
+        return TEXT("");
+    }
+    return FString::Printf(TEXT("[t=%.2f] "), W->GetTimeSeconds());
+}
+
 static FString QuoteArg3(const FString& S)
 {
     FString T = S;
@@ -83,7 +93,8 @@ void ULocalCharacterComponent::BeginPlay()
 
     // Quick visibility into what the component is using at runtime.
     const FLocalTalkerRuntimePaths Paths = ResolvePaths();
-    UE_LOG(LogLocalTalker, Log, TEXT("[%s] LocalTalker paths: LlamaLib='%s' Model='%s' PiperExe='%s' Voice='%s' WorkDir='%s'"),
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] LocalTalker paths: LlamaLib='%s' Model='%s' PiperExe='%s' Voice='%s' WorkDir='%s'"),
+        *LocalTalkerTimePrefix(this),
         *GetSpeakerNameResolved(),
         *Paths.LlamaLibPath, *Paths.LlamaModelPath, *Paths.PiperExePath, *Paths.PiperVoiceModelPath, *Paths.WorkingDir
     );
@@ -124,14 +135,13 @@ void ULocalCharacterComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
     PumpAudioToProcedural();
     UpdateAudioCompletion();
 
-    // Notify the Director when this turn is truly finished (LLM done + TTS jobs done + audio finished).
-    // IMPORTANT: we must not ReleaseTurn while Piper is still generating audio (queues can look empty briefly).
+    // Notify the Director when this turn is text-complete (LLM done + TTS jobs done + audio queued).
+    // We allow the next speaker to start generating while audio is still playing.
     if (!bNotifiedSubsystemFinished &&
         bLLMFinished &&
         PendingSentenceCount.GetValue() == 0 &&
         PendingAudioChunkCount.GetValue() == 0 &&
-        bAudioQueueDrained &&
-        (!AudioComp || !AudioComp->IsPlaying()))
+        bAudioQueueDrained)
     {
         bNotifiedSubsystemFinished = true;
         if (UWorld* W = GetWorld())
@@ -1070,7 +1080,7 @@ FLocalTalkerRuntimePaths ULocalCharacterComponent::ResolvePaths() const
         if (Out.LlamaModelPath.IsEmpty())
         {
             // Default shipped model path (we'll bundle at least one small, permissive GGUF)
-            Out.LlamaModelPath = FPaths::Combine(Base, TEXT("Resources/Models/Llama-3.2-3B-Q4_K_M.gguf"));
+            Out.LlamaModelPath = FPaths::Combine(Base, TEXT("Resources/Models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"));
         }
 
         if (Out.PiperExePath.IsEmpty())
@@ -1226,6 +1236,7 @@ void ULocalCharacterComponent::InternalGrantTurn(const FString& PromptOrText)
     bSpokeThisTurn = false;
     bNotifiedSubsystemFinished = false;
     bAudioQueueDrained = false;
+    PendingAudioDurationSeconds = 0.0;
     PendingSentenceCount.Reset();
     PendingAudioChunkCount.Reset();
 
@@ -1301,7 +1312,8 @@ void ULocalCharacterComponent::OnHeardSpeech(const FString& InSpeakerName, const
     FString OneLine = LocalTalkerOneLine(Text);
     const int32 MaxChars = 120;
     if (OneLine.Len() > MaxChars) OneLine = OneLine.Left(MaxChars) + TEXT("...");
-    UE_LOG(LogLocalTalker, Verbose, TEXT("[%s] Heard (%s) from %s: %s"),
+    UE_LOG(LogLocalTalker, Verbose, TEXT("%s[%s] Heard (%s) from %s: %s"),
+        *LocalTalkerTimePrefix(this),
         *GetSpeakerNameResolved(),
         bFromUser ? TEXT("User") : TEXT("NPC"),
         *InSpeakerName,
@@ -1311,7 +1323,7 @@ void ULocalCharacterComponent::OnHeardSpeech(const FString& InSpeakerName, const
 
 void ULocalCharacterComponent::HandleLLMError(const FString& Error)
 {
-    UE_LOG(LogLocalTalker, Error, TEXT("[%s] LLM error: %s"), *GetSpeakerNameResolved(), *Error);
+    UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] LLM error: %s"), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved(), *Error);
     if (bDebugPrintGeneratedText)
     {
         DebugPrintLine(FString::Printf(TEXT("[%s] LLM ERROR: %s"), *GetSpeakerNameResolved(), *Error), 6.0f, /*bNewLine*/ false);
@@ -1324,7 +1336,7 @@ void ULocalCharacterComponent::HandleLLMToken(const FString& Token)
 {
     if (bDebugLogTokens)
     {
-        UE_LOG(LogLocalTalker, Verbose, TEXT("[%s] token: %s"), *GetSpeakerNameResolved(), *Token);
+        UE_LOG(LogLocalTalker, Verbose, TEXT("%s[%s] token: %s"), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved(), *Token);
     }
     OnToken.Broadcast(Token);
 }
@@ -1377,7 +1389,7 @@ void ULocalCharacterComponent::EnqueueSentence(const FString& Sentence)
             Sub->BroadcastSentence(this, S, /*bFromUser*/ false);
         }
     }
-    UE_LOG(LogLocalTalker, Log, TEXT("[%s] Enqueued sentence (%d chars)"), *GetSpeakerNameResolved(), S.Len());
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Enqueued sentence (%d chars)"), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved(), S.Len());
 }
 
 void ULocalCharacterComponent::ExtractAndEnqueueSentences(bool bForceFlush)
@@ -1519,7 +1531,7 @@ void ULocalCharacterComponent::RunPiperSentenceToAudioQueue(const FString& Sente
         return;
     }
 
-    UE_LOG(LogLocalTalker, Log, TEXT("[%s] Piper start: %s"), *GetSpeakerNameResolved(), *Sentence);
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Piper start: %s"), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved(), *Sentence);
 
     const FString TempDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("LocalTalker"));
     IPlatformFile& PF = FPlatformFileManager::Get().GetPlatformFile();
@@ -1538,7 +1550,7 @@ void ULocalCharacterComponent::RunPiperSentenceToAudioQueue(const FString& Sente
     if (!FLocalTalkerProcess::SpawnWithPipes(Paths.PiperExePath, Args, Paths.WorkingDir, Handle, Pipes, SpawnError))
     {
         OutErr = SpawnError;
-        UE_LOG(LogLocalTalker, Error, TEXT("[%s] Piper spawn failed: %s"), *GetSpeakerNameResolved(), *OutErr);
+        UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] Piper spawn failed: %s"), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved(), *OutErr);
         return;
     }
 
@@ -1563,7 +1575,7 @@ void ULocalCharacterComponent::RunPiperSentenceToAudioQueue(const FString& Sente
     if (ReturnCode != 0)
     {
         OutErr = FString::Printf(TEXT("piper failed (code %d). stderr:\n%s"), ReturnCode, *StdErrAll);
-        UE_LOG(LogLocalTalker, Error, TEXT("[%s] %s"), *GetSpeakerNameResolved(), *OutErr);
+        UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] %s"), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved(), *OutErr);
         return;
     }
 
@@ -1572,7 +1584,7 @@ void ULocalCharacterComponent::RunPiperSentenceToAudioQueue(const FString& Sente
     if (!FLocalTalkerWav::LoadWavPcm16(OutWav, W, WavErr))
     {
         OutErr = WavErr;
-        UE_LOG(LogLocalTalker, Error, TEXT("[%s] WAV load failed: %s"), *GetSpeakerNameResolved(), *OutErr);
+        UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] WAV load failed: %s"), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved(), *OutErr);
         return;
     }
 
@@ -1656,7 +1668,8 @@ void ULocalCharacterComponent::RunPiperSentenceToAudioQueue(const FString& Sente
     AudioQueue.Enqueue(MoveTemp(Bytes));
     bAudioQueueDrained = false;
 
-    UE_LOG(LogLocalTalker, Log, TEXT("[%s] Piper ok: %d samples, %d ch, %d Hz (queued)"),
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Piper ok: %d samples, %d ch, %d Hz (queued)"),
+        *LocalTalkerTimePrefix(this),
         *GetSpeakerNameResolved(),
         W.Samples.Num(),
         NumChannels,
@@ -1673,6 +1686,7 @@ void ULocalCharacterComponent::PumpAudioToProcedural()
 
     TArray<uint8> Bytes;
     bool bQueued = false;
+    double AddedDurationSeconds = 0.0;
 
     for (int32 i = 0; i < 8; i++)
     {
@@ -1690,18 +1704,37 @@ void ULocalCharacterComponent::PumpAudioToProcedural()
             const double Duration = (SampleRate > 0)
                 ? (static_cast<double>(Bytes.Num()) / (2.0 * NumChannels * SampleRate))
                 : 0.0;
-            const double Now = W->GetTimeSeconds();
-            const double Base = FMath::Max(EstimatedAudioEndWorldSeconds, Now);
-            EstimatedAudioEndWorldSeconds = Base + Duration;
+            if (bAudioStarted)
+            {
+                const double Now = W->GetTimeSeconds();
+                const double Base = FMath::Max(EstimatedAudioEndWorldSeconds, Now);
+                EstimatedAudioEndWorldSeconds = Base + Duration;
+            }
+            else
+            {
+                AddedDurationSeconds += Duration;
+            }
         }
     }
 
-    if (bQueued && !bAudioStarted)
+    if (AddedDurationSeconds > 0.0)
+    {
+        PendingAudioDurationSeconds += AddedDurationSeconds;
+    }
+
+    const bool bBlockedByOther = IsAudioBlockedByOtherSpeaker();
+
+    if (!bAudioStarted && PendingAudioDurationSeconds > 0.0f && !bBlockedByOther)
     {
         AudioComp->SetSound(ProcWave);
         AudioComp->Play();
         bAudioStarted = true;
-        UE_LOG(LogLocalTalker, Log, TEXT("[%s] Audio started (procedural)."), *GetSpeakerNameResolved());
+        if (UWorld* W = GetWorld())
+        {
+            EstimatedAudioEndWorldSeconds = W->GetTimeSeconds() + PendingAudioDurationSeconds;
+        }
+        PendingAudioDurationSeconds = 0.0;
+        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Audio started (procedural)."), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved());
     }
 
     if (AudioQueue.IsEmpty() && PendingAudioChunkCount.GetValue() == 0)
@@ -1721,6 +1754,8 @@ void ULocalCharacterComponent::UpdateAudioCompletion()
     {
         EstimatedAudioEndWorldSeconds = 0.0;
         bAudioStarted = false;
+        PendingAudioDurationSeconds = 0.0;
+        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Audio stopped (natural)."), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved());
         return;
     }
 
@@ -1730,9 +1765,30 @@ void ULocalCharacterComponent::UpdateAudioCompletion()
         if (EstimatedAudioEndWorldSeconds > 0.0 &&
             Now >= (EstimatedAudioEndWorldSeconds + TurnReleaseAudioTailSeconds))
         {
+            UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Audio stopped (forced tail)."), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved());
             AudioComp->Stop();
             bAudioStarted = false;
             EstimatedAudioEndWorldSeconds = 0.0;
+            PendingAudioDurationSeconds = 0.0;
         }
     }
+}
+
+bool ULocalCharacterComponent::IsAudioBlockedByOtherSpeaker() const
+{
+    UWorld* W = GetWorld();
+    if (!W) return false;
+
+    ULocalTalkConversationSubsystem* Sub = W->GetSubsystem<ULocalTalkConversationSubsystem>();
+    if (!Sub) return false;
+
+    const TArray<ULocalCharacterComponent*> Participants = Sub->GetContextParticipants(this);
+    for (ULocalCharacterComponent* P : Participants)
+    {
+        if (P && P != this && P->IsAudioPlaying())
+        {
+            return true;
+        }
+    }
+    return false;
 }
