@@ -5,6 +5,7 @@
 #include "LocalTalkerWav.h"
 #include "LocalTalkerLog.h"
 #include "LocalTalkConversationSubsystem.h"
+#include "LocalTalkerLlamaCache.h"
 
 #include "Async/Async.h"
 #include "Engine/Engine.h"
@@ -26,6 +27,8 @@ static FString LocalTalkerTimePrefix(const UObject* Obj)
     return FString::Printf(TEXT("[t=%.2f] "), W->GetTimeSeconds());
 }
 
+static TAtomic<bool> GLocalTalkerPrewarmQueued(false);
+
 static FString QuoteArg3(const FString& S)
 {
     FString T = S;
@@ -37,6 +40,27 @@ static bool IsSentenceTerminator(TCHAR C)
 {
     // Avoid treating '\n' as a terminator: it causes JSON-like outputs to get split into stray `"}"` chunks.
     return C == TEXT('.') || C == TEXT('!') || C == TEXT('?');
+}
+
+static bool IsEllipsisAt(const FString& S, int32 Index)
+{
+    if (Index < 0 || Index >= S.Len()) return false;
+    if (S[Index] != TEXT('.')) return false;
+    const bool bPrevDot = (Index > 0 && S[Index - 1] == TEXT('.'));
+    const bool bNextDot = (Index + 1 < S.Len() && S[Index + 1] == TEXT('.'));
+    return bPrevDot || bNextDot;
+}
+
+static bool LocalTalkerHasAlphaNum(const FString& S)
+{
+    for (int32 i = 0; i < S.Len(); i++)
+    {
+        if (FChar::IsAlnum(S[i]))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 static FString TrimSentence(const FString& In)
@@ -98,6 +122,40 @@ void ULocalCharacterComponent::BeginPlay()
         *GetSpeakerNameResolved(),
         *Paths.LlamaLibPath, *Paths.LlamaModelPath, *Paths.PiperExePath, *Paths.PiperVoiceModelPath, *Paths.WorkingDir
     );
+
+    if (const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>())
+    {
+        if (S->bPrewarmModelOnBeginPlay && !GLocalTalkerPrewarmQueued.Exchange(true))
+        {
+            const FLocalTalkerRuntimePaths PrewarmPaths = ResolvePaths();
+            const FLocalTalkerCharacterConfig PrewarmConfig = ResolveConfig();
+            Async(EAsyncExecution::ThreadPool, [PrewarmPaths, PrewarmConfig]()
+            {
+                FLocalLlamaApi* Api = nullptr;
+                llama_model* Model = nullptr;
+                const llama_vocab* Vocab = nullptr;
+                FString Err;
+                FLocalTalkerLlamaCache::Get().Acquire(
+                    PrewarmPaths.LlamaLibPath,
+                    PrewarmPaths.LlamaModelPath,
+                    PrewarmConfig.GpuLayers,
+                    PrewarmConfig.GpuBackend,
+                    Api,
+                    Model,
+                    Vocab,
+                    Err
+                );
+                if (!Err.IsEmpty())
+                {
+                    UE_LOG(LogLocalTalker, Warning, TEXT("LLM prewarm failed: %s"), *Err);
+                }
+                else
+                {
+                    UE_LOG(LogLocalTalker, Log, TEXT("LLM prewarm complete."));
+                }
+            });
+        }
+    }
 }
 
 void ULocalCharacterComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -600,6 +658,29 @@ static FString LocalTalkerCleanSpokenText(const FString& In)
     // Strip surrounding quotes/braces that often happen when outputs are fragmented.
     S.TrimStartAndEndInline();
 
+    // Strip leading ellipsis fragments (avoids separate ".." or "..." sentences).
+    {
+        int32 DotIdx = 0;
+        while (DotIdx < S.Len() && (S[DotIdx] == TEXT('.') || S[DotIdx] == TCHAR(0x2026)))
+        {
+            DotIdx++;
+        }
+        int32 SpaceIdx = DotIdx;
+        while (SpaceIdx < S.Len() && FChar::IsWhitespace(S[SpaceIdx]))
+        {
+            SpaceIdx++;
+        }
+        if (DotIdx > 0)
+        {
+            if (SpaceIdx >= S.Len())
+            {
+                return FString();
+            }
+            S = S.Mid(SpaceIdx);
+            S.TrimStartAndEndInline();
+        }
+    }
+
     // Strip common transcript / role prefixes repeatedly ("User:", "Assistant:", "Otis:", etc.)
     // This is critical because if any prefix leaks into the context, the Director will propagate it forever.
     auto StripPrefix = [&S](const TCHAR* Prefix) -> bool
@@ -724,6 +805,11 @@ static FString LocalTalkerCleanSpokenText(const FString& In)
     S.ReplaceInline(TEXT("\t"), TEXT(" "));
     while (S.Contains(TEXT("  "))) S.ReplaceInline(TEXT("  "), TEXT(" "));
     S.TrimStartAndEndInline();
+
+    if (!LocalTalkerHasAlphaNum(S))
+    {
+        return FString();
+    }
     return S;
 }
 
@@ -1405,6 +1491,10 @@ void ULocalCharacterComponent::ExtractAndEnqueueSentences(bool bForceFlush)
     {
         if (IsSentenceTerminator(Work[i]))
         {
+            if (Work[i] == TEXT('.') && IsEllipsisAt(Work, i))
+            {
+                continue;
+            }
             CutIdx = i;
             if (i + 1 >= MinCharsBeforeSpeak) break;
         }
@@ -1421,8 +1511,13 @@ void ULocalCharacterComponent::ExtractAndEnqueueSentences(bool bForceFlush)
     {
         if (bForceFlush && Work.Len() > 0)
         {
-            EnqueueSentence(Work);
-            LLMTextBuffer.Reset();
+            const bool bAllowShortFlush = bLLMFinished;
+            const bool bLongEnough = Work.Len() >= MinCharsBeforeSpeak;
+            if (bAllowShortFlush || bLongEnough)
+            {
+                EnqueueSentence(Work);
+                LLMTextBuffer.Reset();
+            }
         }
         return;
     }
@@ -1747,7 +1842,6 @@ void ULocalCharacterComponent::UpdateAudioCompletion()
 {
     if (!AudioComp || !ProcWave) return;
     if (!bAudioStarted) return;
-    if (!bAudioQueueDrained) return;
     if (!bLLMFinished) return;
 
     if (!AudioComp->IsPlaying())
@@ -1758,6 +1852,8 @@ void ULocalCharacterComponent::UpdateAudioCompletion()
         UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Audio stopped (natural)."), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved());
         return;
     }
+
+    if (!bAudioQueueDrained) return;
 
     if (UWorld* W = GetWorld())
     {

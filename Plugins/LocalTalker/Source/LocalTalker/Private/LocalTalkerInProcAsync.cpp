@@ -17,6 +17,15 @@ static TAutoConsoleVariable<int32> CVarLocalTalkerTraceConversation_InProc(
     ECVF_Default
 );
 
+static TAutoConsoleVariable<int32> CVarLocalTalkerLogLLMPerf(
+    TEXT("LocalTalker.LogLLMPerf"),
+    1,
+    TEXT("Log LLM timing breakdown per generation.\n")
+    TEXT("0 = off\n")
+    TEXT("1 = on (default)"),
+    ECVF_Default
+);
+
 static FString LocalTalkerOneLineTrunc(const FString& In, int32 MaxChars)
 {
     FString S = In;
@@ -259,6 +268,13 @@ void ULocalTalkerInProcGenerateAsync::Activate()
     Async(EAsyncExecution::ThreadPool, [this, P, C, Prompt, ActivateStart, bTaggedPrompt]()
     {
         const double Start = FPlatformTime::Seconds();
+        double AcquireDone = 0.0;
+        double TokenizeDone = 0.0;
+        double PromptEvalDone = 0.0;
+        double GenStart = 0.0;
+        double GenDone = 0.0;
+        int32 GeneratedTokens = 0;
+        int32 PromptTokenCount = 0;
         if (P.LlamaLibPath.IsEmpty())
         {
             DispatchError(TEXT("LlamaLibPath is empty. Set Project Settings -> LocalTalker -> DefaultPaths.LlamaLibPath"));
@@ -282,6 +298,7 @@ void ULocalTalkerInProcGenerateAsync::Activate()
                 return;
             }
         }
+        AcquireDone = FPlatformTime::Seconds();
 
         if (!Api || !Model || !Vocab)
         {
@@ -359,6 +376,8 @@ void ULocalTalkerInProcGenerateAsync::Activate()
         }
 
         PromptTokens.SetNum(NPrompt);
+        PromptTokenCount = PromptTokens.Num();
+        TokenizeDone = FPlatformTime::Seconds();
 
         // Evaluate prompt in chunks
         int32 PromptIdx = 0;
@@ -386,6 +405,7 @@ void ULocalTalkerInProcGenerateAsync::Activate()
 
             PromptIdx += Chunk;
         }
+        PromptEvalDone = FPlatformTime::Seconds();
 
         // Sampler chain
         llama_sampler_chain_params SParams = Api->llama_sampler_chain_default_params();
@@ -472,6 +492,7 @@ void ULocalTalkerInProcGenerateAsync::Activate()
             StopSequences.Add(TEXT("\n<|begin_of_text|>"));
         }
 
+        GenStart = FPlatformTime::Seconds();
         for (int32 i = 0; i < C.MaxTokens; i++)
         {
             if (bCancel)
@@ -481,6 +502,7 @@ void ULocalTalkerInProcGenerateAsync::Activate()
 
             llama_token Tok = Api->llama_sampler_sample(Sampler, Ctx, -1);
             Api->llama_sampler_accept(Sampler, Tok);
+            GeneratedTokens++;
 
             if (Api->llama_vocab_is_eog(Vocab, Tok))
             {
@@ -589,9 +611,34 @@ void ULocalTalkerInProcGenerateAsync::Activate()
                 return;
             }
         }
+        GenDone = FPlatformTime::Seconds();
 
         Api->llama_sampler_free(Sampler);
         Api->llama_free(Ctx);
+
+        if (CVarLocalTalkerLogLLMPerf.GetValueOnAnyThread() != 0)
+        {
+            const double Total = GenDone - Start;
+            const double AcquireSec = (AcquireDone > 0.0) ? (AcquireDone - Start) : 0.0;
+            const double TokenizeSec = (TokenizeDone > 0.0 && AcquireDone > 0.0) ? (TokenizeDone - AcquireDone) : 0.0;
+            const double PromptEvalSec = (PromptEvalDone > 0.0 && TokenizeDone > 0.0) ? (PromptEvalDone - TokenizeDone) : 0.0;
+            const double GenSec = (GenDone > 0.0 && GenStart > 0.0) ? (GenDone - GenStart) : 0.0;
+            const double TPS = (GenSec > 0.0) ? ((double)GeneratedTokens / GenSec) : 0.0;
+            UE_LOG(
+                LogLocalTalker,
+                Log,
+                TEXT("[LLMPerf] promptChars=%d promptTokens=%d genTokens=%d acquire=%.3fs tokenize=%.3fs promptEval=%.3fs gen=%.3fs total=%.3fs tps=%.1f"),
+                Prompt.Len(),
+                PromptTokenCount,
+                GeneratedTokens,
+                AcquireSec,
+                TokenizeSec,
+                PromptEvalSec,
+                GenSec,
+                Total,
+                TPS
+            );
+        }
 
         if (bCancel)
         {

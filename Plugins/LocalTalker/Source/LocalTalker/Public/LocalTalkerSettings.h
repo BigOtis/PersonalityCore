@@ -64,4 +64,8 @@ public:
     // Set to 0 to allow full offload.
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Performance", meta=(ClampMin="0"))
     int32 AutoGpuLayerCap = 24;
+
+    // Prewarm the LLM model on BeginPlay to reduce first-turn latency.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Performance")
+    bool bPrewarmModelOnBeginPlay = true;
 };

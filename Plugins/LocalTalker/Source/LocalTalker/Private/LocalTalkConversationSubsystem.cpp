@@ -453,7 +453,7 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
     for (auto& Weak : Context.Participants)
     {
         ULocalCharacterComponent* Candidate = Weak.Get();
-        if (Candidate && Candidate != LastSpeaker && !Candidate->IsGenerationBusy() && !Candidate->IsAudioPlaying())
+        if (Candidate && Candidate != LastSpeaker && !Candidate->IsGenerationBusy())
         {
             // Only respond if the last message was within a reasonable timeframe
             const float TimeSinceLast = GetWorld()->GetTimeSeconds() - Context.LastInteractionTime;
@@ -546,7 +546,7 @@ void ULocalTalkConversationSubsystem::ProcessTurns()
             continue;
         }
 
-        if (T->IsGenerationBusy() || T->IsAudioPlaying()) continue;
+        if (T->IsGenerationBusy()) continue;
 
         // Check if ANYONE in this talker's context is busy
         bool bContextBusy = false;
