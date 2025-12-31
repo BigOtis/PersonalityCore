@@ -5,7 +5,6 @@
 #include "LocalTalkerWav.h"
 #include "LocalTalkerLog.h"
 #include "LocalTalkConversationSubsystem.h"
-#include "LocalTalkerLlamaCache.h"
 
 #include "Async/Async.h"
 #include "Engine/Engine.h"
@@ -27,7 +26,6 @@ static FString LocalTalkerTimePrefix(const UObject* Obj)
     return FString::Printf(TEXT("[t=%.2f] "), W->GetTimeSeconds());
 }
 
-static TAtomic<bool> GLocalTalkerPrewarmQueued(false);
 
 static FString QuoteArg3(const FString& S)
 {
@@ -96,6 +94,7 @@ ULocalCharacterComponent::ULocalCharacterComponent()
         TEXT("Do not mention being an AI or a language model.\n");
 
     Desc = TEXT("");
+    VoicePreviewText = TEXT("Hello there. This is a LocalTalker voice preview.");
 
     // Prefer real UE subtitles instead of debug prints.
     bUseUESubtitles = true;
@@ -123,39 +122,6 @@ void ULocalCharacterComponent::BeginPlay()
         *Paths.LlamaLibPath, *Paths.LlamaModelPath, *Paths.PiperExePath, *Paths.PiperVoiceModelPath, *Paths.WorkingDir
     );
 
-    if (const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>())
-    {
-        if (S->bPrewarmModelOnBeginPlay && !GLocalTalkerPrewarmQueued.Exchange(true))
-        {
-            const FLocalTalkerRuntimePaths PrewarmPaths = ResolvePaths();
-            const FLocalTalkerCharacterConfig PrewarmConfig = ResolveConfig();
-            Async(EAsyncExecution::ThreadPool, [PrewarmPaths, PrewarmConfig]()
-            {
-                FLocalLlamaApi* Api = nullptr;
-                llama_model* Model = nullptr;
-                const llama_vocab* Vocab = nullptr;
-                FString Err;
-                FLocalTalkerLlamaCache::Get().Acquire(
-                    PrewarmPaths.LlamaLibPath,
-                    PrewarmPaths.LlamaModelPath,
-                    PrewarmConfig.GpuLayers,
-                    PrewarmConfig.GpuBackend,
-                    Api,
-                    Model,
-                    Vocab,
-                    Err
-                );
-                if (!Err.IsEmpty())
-                {
-                    UE_LOG(LogLocalTalker, Warning, TEXT("LLM prewarm failed: %s"), *Err);
-                }
-                else
-                {
-                    UE_LOG(LogLocalTalker, Log, TEXT("LLM prewarm complete."));
-                }
-            });
-        }
-    }
 }
 
 void ULocalCharacterComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -1163,6 +1129,19 @@ FLocalTalkerRuntimePaths ULocalCharacterComponent::ResolvePaths() const
             Out.LlamaLibPath = FPaths::Combine(Base, TEXT("ThirdParty/llama/Win64/Release/libllama.dll"));
         }
 
+        if (S && !S->BundledModelFile.IsEmpty())
+        {
+            FString Candidate = S->BundledModelFile;
+            if (FPaths::IsRelative(Candidate))
+            {
+                Candidate = FPaths::Combine(Base, TEXT("Resources/Models"), Candidate);
+            }
+            if (FPaths::FileExists(Candidate))
+            {
+                Out.LlamaModelPath = Candidate;
+            }
+        }
+
         if (Out.LlamaModelPath.IsEmpty())
         {
             // Default shipped model path (we'll bundle at least one small, permissive GGUF)
@@ -1277,6 +1256,26 @@ void ULocalCharacterComponent::Interrupt()
     }
 }
 
+void ULocalCharacterComponent::PreviewVoiceSample()
+{
+#if WITH_EDITOR
+    FString Sample = VoicePreviewText;
+    Sample.TrimStartAndEndInline();
+    if (Sample.IsEmpty())
+    {
+        Sample = TEXT("Hello there. This is a LocalTalker voice preview.");
+    }
+
+    Interrupt();
+    bInterrupted = false;
+    bSpokeThisTurn = false;
+
+    EnsureAudio();
+    StartTTSWorker(ResolvePaths());
+    EnqueueSentenceInternal(Sample, /*bBroadcast*/ false);
+#endif
+}
+
 void ULocalCharacterComponent::ClearConversation()
 {
     if (UWorld* W = GetWorld())
@@ -1292,6 +1291,7 @@ void ULocalCharacterComponent::SpeakTextLocal(const FString& Text)
 {
     bInterrupted = false;
     bLLMFinished = true;
+    bNotifiedSubsystemFinished = false;
 
     EnsureAudio();
     EnqueueSentence(Text);
@@ -1457,7 +1457,7 @@ void ULocalCharacterComponent::HandleLLMCompleted(const FString& Text)
     }
 }
 
-void ULocalCharacterComponent::EnqueueSentence(const FString& Sentence)
+void ULocalCharacterComponent::EnqueueSentenceInternal(const FString& Sentence, bool bBroadcast)
 {
     const FString S = LocalTalkerCleanSpokenText(Sentence);
     if (S.Len() <= 0) return;
@@ -1467,15 +1467,23 @@ void ULocalCharacterComponent::EnqueueSentence(const FString& Sentence)
 
     SentenceQueue.Enqueue(S);
     EmitSubtitle(S);
-    bSpokeThisTurn = true;
-    if (UWorld* W = GetWorld())
+    if (bBroadcast)
     {
-        if (auto* Sub = W->GetSubsystem<ULocalTalkConversationSubsystem>())
+        bSpokeThisTurn = true;
+        if (UWorld* W = GetWorld())
         {
-            Sub->BroadcastSentence(this, S, /*bFromUser*/ false);
+            if (auto* Sub = W->GetSubsystem<ULocalTalkConversationSubsystem>())
+            {
+                Sub->BroadcastSentence(this, S, /*bFromUser*/ false);
+            }
         }
     }
     UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Enqueued sentence (%d chars)"), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved(), S.Len());
+}
+
+void ULocalCharacterComponent::EnqueueSentence(const FString& Sentence)
+{
+    EnqueueSentenceInternal(Sentence, /*bBroadcast*/ true);
 }
 
 void ULocalCharacterComponent::ExtractAndEnqueueSentences(bool bForceFlush)
@@ -1487,8 +1495,32 @@ void ULocalCharacterComponent::ExtractAndEnqueueSentences(bool bForceFlush)
     Work.ReplaceInline(TEXT("\r"), TEXT(""));
 
     int32 CutIdx = INDEX_NONE;
+    int32 LastSoftIdx = INDEX_NONE;
+    int32 LastWordBoundaryIdx = INDEX_NONE;
+    int32 WordCount = 0;
+    bool bInWord = false;
     for (int32 i = 0; i < Work.Len(); i++)
     {
+        const TCHAR C = Work[i];
+        const bool bSpace = FChar::IsWhitespace(C);
+        if (!bSpace)
+        {
+            if (!bInWord)
+            {
+                WordCount++;
+                bInWord = true;
+            }
+        }
+        else
+        {
+            bInWord = false;
+        }
+
+        if (bSpace || C == TEXT(',') || C == TEXT(';') || C == TEXT(':') || C == TEXT('.') || C == TEXT('!') || C == TEXT('?'))
+        {
+            LastWordBoundaryIdx = i;
+        }
+
         if (IsSentenceTerminator(Work[i]))
         {
             if (Work[i] == TEXT('.') && IsEllipsisAt(Work, i))
@@ -1499,9 +1531,23 @@ void ULocalCharacterComponent::ExtractAndEnqueueSentences(bool bForceFlush)
             if (i + 1 >= MinCharsBeforeSpeak) break;
         }
 
+        if (bAllowPhraseChunks && i + 1 >= MinCharsBeforeSpeak)
+        {
+            const bool bHasMinWords = (MinWordsBeforeSpeak > 0) ? (WordCount >= MinWordsBeforeSpeak) : true;
+            if (bHasMinWords && (C == TEXT(',') || C == TEXT(';') || C == TEXT(':')))
+            {
+                LastSoftIdx = i;
+            }
+            if (MaxWordsBeforeSpeak > 0 && WordCount >= MaxWordsBeforeSpeak)
+            {
+                CutIdx = (LastSoftIdx != INDEX_NONE) ? LastSoftIdx : i;
+                break;
+            }
+        }
+
         if (i >= MaxSentenceChars)
         {
-            CutIdx = i;
+            CutIdx = (LastSoftIdx != INDEX_NONE && LastSoftIdx >= MinCharsBeforeSpeak) ? LastSoftIdx : i;
             break;
         }
 
@@ -1520,6 +1566,11 @@ void ULocalCharacterComponent::ExtractAndEnqueueSentences(bool bForceFlush)
             }
         }
         return;
+    }
+
+    if (CutIdx != INDEX_NONE && LastWordBoundaryIdx != INDEX_NONE && CutIdx > LastWordBoundaryIdx)
+    {
+        CutIdx = LastWordBoundaryIdx;
     }
 
     const int32 TakeLen = CutIdx + 1;
@@ -1843,6 +1894,10 @@ void ULocalCharacterComponent::UpdateAudioCompletion()
     if (!AudioComp || !ProcWave) return;
     if (!bAudioStarted) return;
     if (!bLLMFinished) return;
+    if (PendingSentenceCount.GetValue() > 0 || PendingAudioChunkCount.GetValue() > 0)
+    {
+        return;
+    }
 
     if (!AudioComp->IsPlaying())
     {

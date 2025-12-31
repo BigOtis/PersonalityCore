@@ -2,6 +2,7 @@
 #include "LocalLlamaDyn.h"
 #include "LocalTalkerLlamaCache.h"
 #include "LocalTalkerLog.h"
+#include "LocalTalkerSettings.h"
 
 #include "Async/Async.h"
 #include "HAL/IConsoleManager.h"
@@ -275,6 +276,9 @@ void ULocalTalkerInProcGenerateAsync::Activate()
         double GenDone = 0.0;
         int32 GeneratedTokens = 0;
         int32 PromptTokenCount = 0;
+        int32 PromptTokenCountUsed = 0;
+        int32 PromptTokensTrimmed = 0;
+        int32 UsedContextTokens = 0;
         if (P.LlamaLibPath.IsEmpty())
         {
             DispatchError(TEXT("LlamaLibPath is empty. Set Project Settings -> LocalTalker -> DefaultPaths.LlamaLibPath"));
@@ -306,29 +310,6 @@ void ULocalTalkerInProcGenerateAsync::Activate()
             return;
         }
 
-        // Context
-        llama_context_params CParams = Api->llama_context_default_params();
-        const int32 Cores = FMath::Max(1, FPlatformMisc::NumberOfCoresIncludingHyperthreads());
-        CParams.n_threads = Cores;
-        CParams.n_threads_batch = Cores;
-        CParams.n_ctx = 4096;
-        CParams.n_batch = 512;
-        CParams.abort_callback = &LocalTalkerAbortCb;
-        CParams.abort_callback_data = (void*)&bCancel;
-
-        llama_context* Ctx = Api->llama_init_from_model ? Api->llama_init_from_model(Model, CParams)
-                                                        : (Api->llama_new_context_with_model ? Api->llama_new_context_with_model(Model, CParams) : nullptr);
-        if (!Ctx)
-        {
-            DispatchError(TEXT("Failed to create llama_context."));
-            return;
-        }
-
-        if (Api->llama_set_n_threads)
-        {
-            Api->llama_set_n_threads(Ctx, CParams.n_threads, CParams.n_threads_batch);
-        }
-
         // Tokenize prompt
         FTCHARToUTF8 PromptUtf8(*Prompt);
         const int32 PromptLen = PromptUtf8.Length();
@@ -351,7 +332,6 @@ void ULocalTalkerInProcGenerateAsync::Activate()
             const int32 Needed = -NPrompt;
             if (Needed <= 0)
             {
-                Api->llama_free(Ctx);
                 DispatchError(TEXT("llama_tokenize failed (invalid return)."));
                 return;
             }
@@ -369,7 +349,6 @@ void ULocalTalkerInProcGenerateAsync::Activate()
 
             if (NPrompt < 0)
             {
-                Api->llama_free(Ctx);
                 DispatchError(TEXT("llama_tokenize failed after resizing buffer."));
                 return;
             }
@@ -378,6 +357,45 @@ void ULocalTalkerInProcGenerateAsync::Activate()
         PromptTokens.SetNum(NPrompt);
         PromptTokenCount = PromptTokens.Num();
         TokenizeDone = FPlatformTime::Seconds();
+
+        const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>();
+        const int32 MinCtx = S ? S->MinContextTokens : 512;
+        const int32 MaxCtx = S ? S->MaxContextTokens : 2048;
+        const int32 Margin = S ? S->ContextTokenMargin : 64;
+        const int32 NeededCtx = PromptTokens.Num() + C.MaxTokens + Margin;
+        UsedContextTokens = FMath::Clamp(NeededCtx, MinCtx, MaxCtx);
+
+        const int32 MaxPromptTokens = FMath::Max(0, UsedContextTokens - C.MaxTokens - 1);
+        if (MaxPromptTokens > 0 && PromptTokens.Num() > MaxPromptTokens)
+        {
+            const int32 Drop = PromptTokens.Num() - MaxPromptTokens;
+            PromptTokens.RemoveAt(0, Drop, EAllowShrinking::No);
+            PromptTokensTrimmed = Drop;
+        }
+        PromptTokenCountUsed = PromptTokens.Num();
+
+        // Context
+        llama_context_params CParams = Api->llama_context_default_params();
+        const int32 Cores = FMath::Max(1, FPlatformMisc::NumberOfCoresIncludingHyperthreads());
+        CParams.n_threads = Cores;
+        CParams.n_threads_batch = Cores;
+        CParams.n_ctx = UsedContextTokens;
+        CParams.n_batch = FMath::Min(512, UsedContextTokens);
+        CParams.abort_callback = &LocalTalkerAbortCb;
+        CParams.abort_callback_data = (void*)&bCancel;
+
+        llama_context* Ctx = Api->llama_init_from_model ? Api->llama_init_from_model(Model, CParams)
+                                                        : (Api->llama_new_context_with_model ? Api->llama_new_context_with_model(Model, CParams) : nullptr);
+        if (!Ctx)
+        {
+            DispatchError(TEXT("Failed to create llama_context."));
+            return;
+        }
+
+        if (Api->llama_set_n_threads)
+        {
+            Api->llama_set_n_threads(Ctx, CParams.n_threads, CParams.n_threads_batch);
+        }
 
         // Evaluate prompt in chunks
         int32 PromptIdx = 0;
@@ -627,9 +645,12 @@ void ULocalTalkerInProcGenerateAsync::Activate()
             UE_LOG(
                 LogLocalTalker,
                 Log,
-                TEXT("[LLMPerf] promptChars=%d promptTokens=%d genTokens=%d acquire=%.3fs tokenize=%.3fs promptEval=%.3fs gen=%.3fs total=%.3fs tps=%.1f"),
+                TEXT("[LLMPerf] promptChars=%d promptTokens=%d used=%d trimmed=%d ctx=%d genTokens=%d acquire=%.3fs tokenize=%.3fs promptEval=%.3fs gen=%.3fs total=%.3fs tps=%.1f"),
                 Prompt.Len(),
                 PromptTokenCount,
+                PromptTokenCountUsed,
+                PromptTokensTrimmed,
+                UsedContextTokens,
                 GeneratedTokens,
                 AcquireSec,
                 TokenizeSec,

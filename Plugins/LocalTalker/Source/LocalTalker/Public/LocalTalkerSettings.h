@@ -12,9 +12,15 @@ class LOCALTALKER_API ULocalTalkerSettings : public UDeveloperSettings
 
 public:
     ULocalTalkerSettings();
+    virtual FName GetCategoryName() const override;
+    virtual FName GetSectionName() const override;
 
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Paths")
     FLocalTalkerRuntimePaths DefaultPaths;
+
+    // Optional: pick a GGUF model bundled in Resources/Models via dropdown.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Paths", meta=(GetOptions="GetAvailableModelOptions"))
+    FString BundledModelFile;
 
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Defaults")
     FLocalTalkerCharacterConfig DefaultCharacterConfig;
@@ -65,7 +71,17 @@ public:
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Performance", meta=(ClampMin="0"))
     int32 AutoGpuLayerCap = 24;
 
-    // Prewarm the LLM model on BeginPlay to reduce first-turn latency.
-    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Performance")
-    bool bPrewarmModelOnBeginPlay = true;
+    // Dynamic context sizing (tokens). The runtime will clamp n_ctx to this range.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Performance", meta=(ClampMin="128"))
+    int32 MinContextTokens = 512;
+
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Performance", meta=(ClampMin="128"))
+    int32 MaxContextTokens = 2048;
+
+    // Extra headroom for generation (tokens) when sizing n_ctx.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Performance", meta=(ClampMin="0"))
+    int32 ContextTokenMargin = 64;
+
+    UFUNCTION()
+    TArray<FString> GetAvailableModelOptions() const;
 };

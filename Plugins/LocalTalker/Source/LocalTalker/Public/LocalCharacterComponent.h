@@ -48,6 +48,18 @@ public:
     UPROPERTY(EditAnywhere, Category="LocalTalker|Streaming TTS")
     int32 MinCharsBeforeSpeak = 24;
 
+    // If true, allow short phrase chunks (commas/clauses) for lower latency streaming.
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Streaming TTS")
+    bool bAllowPhraseChunks = true;
+
+    // Minimum word count before we allow phrase chunking.
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Streaming TTS", meta=(ClampMin="1"))
+    int32 MinWordsBeforeSpeak = 6;
+
+    // If set, force a chunk once this many words are buffered.
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Streaming TTS", meta=(ClampMin="1"))
+    int32 MaxWordsBeforeSpeak = 16;
+
     // If true, the component will begin TTS while tokens stream in (sentence-chunking).
     UPROPERTY(EditAnywhere, Category="LocalTalker|Streaming TTS")
     bool bSpeakStreaming = true;
@@ -70,6 +82,12 @@ public:
 
     UPROPERTY(EditAnywhere, Category="LocalTalker|Subtitles")
     bool bShowOnScreenSubtitles = true;
+
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Voices", meta=(GetOptions="GetVoiceOptions"))
+    FName VoiceId = NAME_None;
+
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Voices", meta=(MultiLine="true"))
+    FString VoicePreviewText;
 
     UPROPERTY(EditAnywhere, Category="LocalTalker|Conversation")
     float ConversationRadius = 1500.0f;
@@ -118,6 +136,9 @@ public:
     UFUNCTION(BlueprintCallable, Category="LocalTalker")
     void Interrupt();
 
+    UFUNCTION(CallInEditor, Category="LocalTalker|Voices")
+    void PreviewVoiceSample();
+
     /** Clear conversation history. */
     UFUNCTION(BlueprintCallable, Category="LocalTalker|Prompt")
     void ClearConversation();
@@ -164,6 +185,9 @@ public:
     {
         return IsGenerationBusy() || ((AudioComp != nullptr) && AudioComp->IsPlaying());
     }
+
+    UFUNCTION()
+    TArray<FString> GetVoiceOptions() const;
 
 protected:
     virtual void BeginPlay() override;
@@ -220,9 +244,6 @@ private:
     // When printing debug subtitles on screen.
     float OnScreenSubtitleSeconds = 4.0f;
 
-    // Voice selection (Id in Project Settings -> LocalTalker -> Voices).
-    FName VoiceId = NAME_None;
-
     // Updated from the TTS worker thread; read on game thread.
     TAtomic<uint64> LastAudioEnqueueCycles { 0 };
 
@@ -236,6 +257,7 @@ private:
     void StartTTSWorker(const FLocalTalkerRuntimePaths& Paths);
     void StopTTSWorker();
     void EnqueueSentence(const FString& Sentence);
+    void EnqueueSentenceInternal(const FString& Sentence, bool bBroadcast);
     void ExtractAndEnqueueSentences(bool bForceFlush);
     void PumpAudioToProcedural();
     void UpdateAudioCompletion();
@@ -243,7 +265,6 @@ private:
     FString BuildPromptWithHistory(const FLocalTalkerCharacterConfig& Config, const FString& UserText) const;
     void EmitSubtitle(const FString& Text);
     void DebugPrintLine(const FString& Line, float Seconds, bool bNewLine) const;
-    TArray<FString> GetVoiceOptions() const;
     FString ResolveVoiceOnnxPath() const;
 
     UFUNCTION() void HandleLLMError(const FString& Error);
