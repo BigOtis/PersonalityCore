@@ -6,7 +6,7 @@
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
 
-static FString LocalTalkerTimePrefix(const UObject* Obj)
+static FString LocalTalkerTimePrefixSubsystem(const UObject* Obj)
 {
     const UWorld* W = Obj ? Obj->GetWorld() : nullptr;
     if (!W)
@@ -30,12 +30,12 @@ static bool LocalTalkerIsAnyPlayerPawnInHearingRange(const UWorld* World, const 
 
         const FVector PawnLoc = Pawn->GetActorLocation();
 
-        // "In range to hear" = within any participant's ConversationRadius.
+        // "In range to hear" = within any participant's hearing radius.
         for (const auto& WeakP : Context.Participants)
         {
             const ULocalCharacterComponent* P = WeakP.Get();
             if (!P || !P->GetOwner()) continue;
-            const float R = FMath::Max(0.0f, P->ConversationRadius);
+            const float R = FMath::Max(0.0f, P->GetHearingRadius());
             if (R <= 0.0f) continue;
 
             const FVector TalkerLoc = P->GetOwner()->GetActorLocation();
@@ -52,7 +52,7 @@ static bool LocalTalkerIsAnyPlayerPawnInHearingRange(const UWorld* World, const 
 void ULocalTalkConversationSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
-    UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] Conversation Subsystem Initialized."), *LocalTalkerTimePrefix(this));
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] Conversation Subsystem Initialized."), *LocalTalkerTimePrefixSubsystem(this));
 }
 
 TStatId ULocalTalkConversationSubsystem::GetStatId() const
@@ -75,7 +75,7 @@ void ULocalTalkConversationSubsystem::RegisterTalker(ULocalCharacterComponent* T
     if (!Talker) return;
     Registry.Add(Talker);
     UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] Registered: '%s' (Total: %d)"),
-        *LocalTalkerTimePrefix(this),
+        *LocalTalkerTimePrefixSubsystem(this),
         *Talker->GetSpeakerNameResolved(), Registry.Num());
 }
 
@@ -89,7 +89,7 @@ void ULocalTalkConversationSubsystem::UnregisterTalker(ULocalCharacterComponent*
     // Remove from manual queue if they were waiting
     ManualQueue.RemoveAll([Talker](const FQueuedTurn& T) { return T.Talker.Get() == Talker; });
 
-    UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] Unregistered: '%s'"), *LocalTalkerTimePrefix(this), *Name);
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] Unregistered: '%s'"), *LocalTalkerTimePrefixSubsystem(this), *Name);
 }
 
 void ULocalTalkConversationSubsystem::RequestTurn(ULocalCharacterComponent* Talker, const FString& Prompt)
@@ -137,7 +137,7 @@ void ULocalTalkConversationSubsystem::EnqueueTurn(ULocalCharacterComponent* Talk
     ManualQueue.Add(MoveTemp(NewTurn));
     
     UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] '%s' requested turn (Manual Queue length: %d)"),
-        *LocalTalkerTimePrefix(this),
+        *LocalTalkerTimePrefixSubsystem(this),
         *Talker->GetSpeakerNameResolved(), ManualQueue.Num());
 }
 
@@ -146,7 +146,7 @@ void ULocalTalkConversationSubsystem::ReleaseTurn(ULocalCharacterComponent* Talk
     if (!Talker) return;
     
     UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] '%s' finished talking."),
-        *LocalTalkerTimePrefix(this),
+        *LocalTalkerTimePrefixSubsystem(this),
         *Talker->GetSpeakerNameResolved());
 
     // If the talker didn't emit any speech this turn, do NOT auto-trigger a response.
@@ -171,7 +171,7 @@ void ULocalTalkConversationSubsystem::BroadcastSentence(ULocalCharacterComponent
     if (!Context) return;
 
     FString SpeakerName = Speaker->GetSpeakerNameResolved();
-    UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] %s: %s"), *LocalTalkerTimePrefix(this), *SpeakerName, *Text);
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] %s: %s"), *LocalTalkerTimePrefixSubsystem(this), *SpeakerName, *Text);
 
     AddMessageToContext(*Context, SpeakerName, Text, bFromUser);
 
@@ -253,6 +253,7 @@ void ULocalTalkConversationSubsystem::MaintainKeepAlive()
     const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>();
     if (!S || !S->bKeepConversationAlive) return;
 
+    const bool bRequireListenerAll = S->bRequirePlayerListenerForAllTalk;
     const float MaxSilence = FMath::Max(0.0f, S->MaxSilenceSeconds);
     const float MinDelay = FMath::Max(0.0f, S->MinSecondsBetweenAutoReplies);
     const bool bAllowNpcToNpc = S->bAllowNpcToNpcAuto;
@@ -284,6 +285,11 @@ void ULocalTalkConversationSubsystem::MaintainKeepAlive()
 
         // Respect listener gating unless explicitly ignored for keep-alive.
         if (bRequireListener && !bIgnoreListener && !LocalTalkerIsAnyPlayerPawnInHearingRange(W, Context))
+        {
+            continue;
+        }
+
+        if (bRequireListenerAll && !LocalTalkerIsAnyPlayerPawnInHearingRange(W, Context))
         {
             continue;
         }
@@ -356,7 +362,7 @@ FLocalConversationContext* ULocalTalkConversationSubsystem::FindOrCreateContext(
     // Try to find an existing context near this location
     for (auto& Context : ActiveContexts)
     {
-        if (FVector::Dist(Context.LastCenter, Loc) < Agent->ConversationRadius)
+        if (FVector::Dist(Context.LastCenter, Loc) < Agent->GetHearingRadius())
         {
             // If we found one, update its center to reflect ongoing activity
             Context.LastCenter = FMath::Lerp(Context.LastCenter, Loc, 0.2f);
@@ -406,6 +412,8 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
 {
     RefreshContextParticipants(Context);
 
+    const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>();
+
     // Don't start a new turn if someone is still busy (LLM processing or TTS speaking)
     for (auto& Weak : Context.Participants)
     {
@@ -422,7 +430,6 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
 
     const FLocalTalkMessage& LastMsg = Context.History.Last();
 
-    const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>();
     const bool bAllowNpcToNpc = S ? S->bAllowNpcToNpcAuto : false;
     const int32 MaxNpcTurns = S ? S->MaxConsecutiveNpcTurns : 0;
     const float MinDelay = S ? S->MinSecondsBetweenAutoReplies : 0.0f;
@@ -464,7 +471,7 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
                     *LastMsg.SpeakerName
                 );
                 UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] -> TRIGGERING RESPONSE from '%s'"),
-                    *LocalTalkerTimePrefix(this),
+                    *LocalTalkerTimePrefixSubsystem(this),
                     *Candidate->GetSpeakerNameResolved());
                 // Queue as a normal turn, but delay granting so conversations don't machine-gun between NPCs.
                 const double Now = (double)GetWorld()->GetTimeSeconds();
@@ -495,7 +502,7 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
                         TEXT("Director instruction: Continue speaking to the nearby listener. Add a NEW detail or viewpoint, do not echo your exact wording, and end with a natural question.")
                     );
                     UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] -> TRIGGERING SOLO CONTINUATION from '%s'"),
-                        *LocalTalkerTimePrefix(this),
+                        *LocalTalkerTimePrefixSubsystem(this),
                         *LastSpeaker->GetSpeakerNameResolved());
                     const double Now = (double)GetWorld()->GetTimeSeconds();
                     const double Earliest = Now + (double)FMath::Max(0.0f, MinDelay);
@@ -514,7 +521,7 @@ void ULocalTalkConversationSubsystem::RefreshContextParticipants(FLocalConversat
         ULocalCharacterComponent* Agent = WeakAgent.Get();
         if (!Agent || !Agent->GetOwner()) continue;
 
-        const float R = FMath::Max(0.0f, Agent->ConversationRadius);
+        const float R = FMath::Max(0.0f, Agent->GetHearingRadius());
         if (R <= 0.0f) continue;
 
         const float Dist = FVector::Dist(Agent->GetOwner()->GetActorLocation(), Context.LastCenter);
@@ -529,6 +536,8 @@ void ULocalTalkConversationSubsystem::ProcessTurns()
 {
     const UWorld* W = GetWorld();
     const double Now = W ? (double)W->GetTimeSeconds() : 0.0;
+    const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>();
+    const bool bRequireListenerAll = S ? S->bRequirePlayerListenerForAllTalk : false;
 
     // Handle manual requests (e.g. Player interaction or scripted events)
     for (int32 i = 0; i < ManualQueue.Num(); i++)
@@ -548,9 +557,15 @@ void ULocalTalkConversationSubsystem::ProcessTurns()
 
         if (T->IsGenerationBusy()) continue;
 
+        FLocalConversationContext* Context = FindOrCreateContext(T);
+        if (bRequireListenerAll && Context && !LocalTalkerIsAnyPlayerPawnInHearingRange(GetWorld(), *Context))
+        {
+            continue;
+        }
+
         // Check if ANYONE in this talker's context is busy
         bool bContextBusy = false;
-        if (FLocalConversationContext* Context = FindOrCreateContext(T))
+        if (Context)
         {
             for (auto& Weak : Context->Participants)
             {
@@ -572,7 +587,7 @@ void ULocalTalkConversationSubsystem::ProcessTurns()
             i--;
 
             UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] -> GRANTING TURN to: '%s'"),
-                *LocalTalkerTimePrefix(this),
+                *LocalTalkerTimePrefixSubsystem(this),
                 *T->GetSpeakerNameResolved());
             T->InternalGrantTurn(Prompt);
         }
@@ -602,4 +617,17 @@ TArray<ULocalCharacterComponent*> ULocalTalkConversationSubsystem::GetRegistered
         if (Weak.IsValid()) Result.Add(Weak.Get());
     }
     return Result;
+}
+
+bool ULocalTalkConversationSubsystem::HasPlayerListenerInRange(const ULocalCharacterComponent* Talker) const
+{
+    if (!Talker) return false;
+    const UWorld* W = GetWorld();
+    if (!W) return false;
+
+    FLocalConversationContext* Context = const_cast<ULocalTalkConversationSubsystem*>(this)
+        ->FindOrCreateContext(const_cast<ULocalCharacterComponent*>(Talker));
+    if (!Context) return false;
+
+    return LocalTalkerIsAnyPlayerPawnInHearingRange(W, *Context);
 }

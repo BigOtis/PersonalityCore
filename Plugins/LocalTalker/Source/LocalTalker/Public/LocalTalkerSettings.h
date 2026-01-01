@@ -45,6 +45,11 @@ public:
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Conversation")
     bool bRequirePlayerListenerForAuto = true;
 
+    // If enabled, ALL speech (including direct/manual prompts) is gated by a local player listener
+    // being within hearing range of the conversation participants.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Conversation")
+    bool bRequirePlayerListenerForAllTalk = true;
+
     // Optional pacing: the Director won't auto-trigger until at least this much time has passed since the last message.
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Conversation", meta=(ClampMin="0.0"))
     float MinSecondsBetweenAutoReplies = 0.10f;

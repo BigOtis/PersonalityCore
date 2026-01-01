@@ -29,6 +29,14 @@ class LOCALTALKER_API ULocalCharacterComponent : public UActorComponent
 {
     GENERATED_BODY()
 
+    struct FLocalTalkerAudioChunk
+    {
+        TArray<uint8> Bytes;
+        int32 SampleRate = 0;
+        int32 NumChannels = 0;
+        double DurationSeconds = 0.0;
+    };
+
 public:
     ULocalCharacterComponent();
 
@@ -86,11 +94,17 @@ public:
     UPROPERTY(EditAnywhere, Category="LocalTalker|Voices", meta=(GetOptions="GetVoiceOptions"))
     FName VoiceId = NAME_None;
 
-    UPROPERTY(EditAnywhere, Category="LocalTalker|Voices", meta=(MultiLine="true"))
-    FString VoicePreviewText;
-
     UPROPERTY(EditAnywhere, Category="LocalTalker|Conversation")
     float ConversationRadius = 1500.0f;
+
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Audio")
+    bool bUseLocalSound = true;
+
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Audio", meta=(ClampMin="0.0"))
+    float VoiceVolumeMultiplier = 1.0f;
+
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Audio", meta=(ClampMin="0.0"))
+    float VoiceAttenuationRadius = 0.0f;
 
     UPROPERTY(EditAnywhere, Category="LocalTalker|Prompt")
     FString Directions;
@@ -136,14 +150,15 @@ public:
     UFUNCTION(BlueprintCallable, Category="LocalTalker")
     void Interrupt();
 
-    UFUNCTION(CallInEditor, Category="LocalTalker|Voices")
-    void PreviewVoiceSample();
-
     /** Clear conversation history. */
     UFUNCTION(BlueprintCallable, Category="LocalTalker|Prompt")
     void ClearConversation();
 
     FString GetSpeakerNameResolved() const;
+    float GetHearingRadius() const
+    {
+        return (VoiceAttenuationRadius > 0.0f) ? VoiceAttenuationRadius : ConversationRadius;
+    }
     bool IsAudioPlaying() const { return AudioComp && AudioComp->IsPlaying(); }
     bool IsGenerationBusy() const
     {
@@ -162,10 +177,12 @@ public:
     void Test_InitAudio() { EnsureAudio(); }
     void Test_EnqueueAudioChunk(int32 SR, int32 NC, int32 NS) 
     { 
-        (void)SR; (void)NC;
-        TArray<uint8> Bytes;
-        Bytes.SetNumZeroed(NS * 2);
-        AudioQueue.Enqueue(MoveTemp(Bytes));
+        FLocalTalkerAudioChunk Chunk;
+        Chunk.SampleRate = SR;
+        Chunk.NumChannels = NC;
+        Chunk.Bytes.SetNumZeroed(NS * 2);
+        Chunk.DurationSeconds = (SR > 0 && NC > 0) ? (static_cast<double>(Chunk.Bytes.Num()) / (2.0 * NC * SR)) : 0.0;
+        AudioQueue.Enqueue(MoveTemp(Chunk));
         PendingAudioChunkCount.Increment();
     }
     void Test_PumpAudio() { PumpAudioToProcedural(); }
@@ -220,12 +237,13 @@ private:
     float FlushSeconds = 0.40f;
     
     TQueue<FString, EQueueMode::Mpsc> SentenceQueue;
-    TQueue<TArray<uint8>, EQueueMode::Mpsc> AudioQueue;
+    TQueue<FLocalTalkerAudioChunk, EQueueMode::Mpsc> AudioQueue;
 
     FThreadSafeBool bTTSStop = false;
     FRunnableThread* TTSThread = nullptr;
     FRunnable* TTSRunnable = nullptr;
     bool bTTSWorkerRunning = false;
+    FThreadSafeBool bProcUnderflowed = false;
 
     // Bookkeeping
     FThreadSafeCounter PendingSentenceCount;
@@ -234,7 +252,6 @@ private:
     bool bNotifiedSubsystemFinished = false;
     bool bAudioStarted = false;
 
-    bool bForce2DAudio = true;
     int32 ProcNumChannels = 1;
     int32 ProcSampleRate = 22050;
 
@@ -266,6 +283,8 @@ private:
     void EmitSubtitle(const FString& Text);
     void DebugPrintLine(const FString& Line, float Seconds, bool bNewLine) const;
     FString ResolveVoiceOnnxPath() const;
+    void HandleProcUnderflow(USoundWaveProcedural* InWave, int32 SamplesNeeded);
+    bool ShouldAllowTalk() const;
 
     UFUNCTION() void HandleLLMError(const FString& Error);
     UFUNCTION() void HandleLLMToken(const FString& Token);
@@ -273,6 +292,7 @@ private:
     UFUNCTION() void HandleLLMCompleted(const FString& Text);
 
     void RunPiperSentenceToAudioQueue(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, FString& OutErr);
+    bool GeneratePiperAudioBytes(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, TArray<uint8>& OutBytes, int32& OutSampleRate, int32& OutNumChannels, FString& OutErr);
     FLocalTalkerRuntimePaths ResolvePaths() const;
     FLocalTalkerCharacterConfig ResolveConfig() const;
 };

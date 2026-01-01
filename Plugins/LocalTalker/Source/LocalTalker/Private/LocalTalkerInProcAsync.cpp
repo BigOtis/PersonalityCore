@@ -128,7 +128,7 @@ static bool LocalTalkerAbortCb(void* Data)
     return Flag && (*Flag);
 }
 
-static bool LocalTalkerModelLooksLikeLlama3(const FString& ModelPath)
+static bool LocalTalkerModelLooksLikeLlama3Async(const FString& ModelPath)
 {
     const FString Base = FPaths::GetBaseFilename(ModelPath).ToLower();
     return Base.Contains(TEXT("llama-3")) || Base.Contains(TEXT("llama3"));
@@ -164,7 +164,7 @@ static FString BuildPrompt(const FLocalTalkerRuntimePaths& P, const FLocalTalker
 
     // Keep system strictly for role + output rules. Character details belong in the user block.
 
-    if (LocalTalkerModelLooksLikeLlama3(P.LlamaModelPath))
+    if (LocalTalkerModelLooksLikeLlama3Async(P.LlamaModelPath))
     {
         FString Prompt;
         Prompt.Reserve(SystemBlock.Len() + UserPrompt.Len() + 128);

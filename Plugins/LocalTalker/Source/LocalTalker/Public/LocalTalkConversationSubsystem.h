@@ -94,6 +94,7 @@ public:
 
     // --- Queries ---
     TArray<ULocalCharacterComponent*> GetRegisteredTalkers() const;
+    bool HasPlayerListenerInRange(const ULocalCharacterComponent* Talker) const;
 
 private:
     UPROPERTY()

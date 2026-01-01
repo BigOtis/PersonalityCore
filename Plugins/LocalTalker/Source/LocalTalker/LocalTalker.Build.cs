@@ -26,6 +26,7 @@ public class LocalTalker : ModuleRules
             "AutomationTest"
         });
 
+
         if (Target.Platform == UnrealTargetPlatform.Win64)
         {
             string PluginDir = Path.GetFullPath(Path.Combine(ModuleDirectory, "..", ".."));
