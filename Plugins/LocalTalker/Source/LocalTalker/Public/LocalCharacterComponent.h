@@ -29,14 +29,6 @@ class LOCALTALKER_API ULocalCharacterComponent : public UActorComponent
 {
     GENERATED_BODY()
 
-    struct FLocalTalkerAudioChunk
-    {
-        TArray<uint8> Bytes;
-        int32 SampleRate = 0;
-        int32 NumChannels = 0;
-        double DurationSeconds = 0.0;
-    };
-
 public:
     ULocalCharacterComponent();
 
@@ -70,16 +62,11 @@ public:
 
     // If true, the component will begin TTS while tokens stream in (sentence-chunking).
     UPROPERTY(EditAnywhere, Category="LocalTalker|Streaming TTS")
-    bool bSpeakStreaming = true;
+    bool bSpeakStreaming = false;
 
     // Safety cap to avoid unbounded buffering if the model doesn't emit terminators.
     UPROPERTY(EditAnywhere, Category="LocalTalker|Streaming TTS", meta=(ClampMin="16"))
     int32 MaxSentenceChars = 240;
-
-    // Procedural audio can keep "playing" with a silent tail; this controls how quickly we force-stop it
-    // once we know no more chunks are coming, so the Director can hand off the turn promptly.
-    UPROPERTY(EditAnywhere, Category="LocalTalker|Streaming TTS", meta=(ClampMin="0.0"))
-    float TurnReleaseAudioTailSeconds = 0.05f;
 
     // If true, uses UE SubtitleManager to display subtitles (otherwise only fires events / debug).
     UPROPERTY(EditAnywhere, Category="LocalTalker|Subtitles")
@@ -105,6 +92,9 @@ public:
 
     UPROPERTY(EditAnywhere, Category="LocalTalker|Audio", meta=(ClampMin="0.0"))
     float VoiceAttenuationRadius = 0.0f;
+
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Audio", meta=(ClampMin="0.0"))
+    float AudioCompletionGraceSeconds = 0.25f;
 
     UPROPERTY(EditAnywhere, Category="LocalTalker|Prompt")
     FString Directions;
@@ -163,33 +153,20 @@ public:
     bool IsGenerationBusy() const
     {
         const bool bLLMBusy = (bLLMFinished == false && ActiveLLM != nullptr);
-        const bool bTTSBusy = (PendingSentenceCount.GetValue() > 0) || (PendingAudioChunkCount.GetValue() > 0);
+        const bool bTTSBusy = (PendingSentenceCount.GetValue() > 0);
         return bIsSpeakingInternal || bLLMBusy || bTTSBusy;
     }
 
 #if WITH_EDITOR
     // Test Helpers
-    void Test_SetPendingCounts(int32 S, int32 A) { PendingSentenceCount.Set(S); PendingAudioChunkCount.Set(A); }
+    void Test_SetPendingCounts(int32 S) { PendingSentenceCount.Set(S); }
     void Test_SetLLMTextBuffer(const FString& S) { LLMTextBuffer = S; }
     void Test_TickComponent(float dt) { TickComponent(dt, LEVELTICK_All, nullptr); }
     int32 Test_GetPendingSentenceCount() const { return PendingSentenceCount.GetValue(); }
     int32 Test_GetLLMTextBufferLen() const { return LLMTextBuffer.Len(); }
     void Test_InitAudio() { EnsureAudio(); }
-    void Test_EnqueueAudioChunk(int32 SR, int32 NC, int32 NS) 
-    { 
-        FLocalTalkerAudioChunk Chunk;
-        Chunk.SampleRate = SR;
-        Chunk.NumChannels = NC;
-        Chunk.Bytes.SetNumZeroed(NS * 2);
-        Chunk.DurationSeconds = (SR > 0 && NC > 0) ? (static_cast<double>(Chunk.Bytes.Num()) / (2.0 * NC * SR)) : 0.0;
-        AudioQueue.Enqueue(MoveTemp(Chunk));
-        PendingAudioChunkCount.Increment();
-    }
-    void Test_PumpAudio() { PumpAudioToProcedural(); }
-    void Test_GetProcFormat(int32& SR, int32& NC) { if (ProcWave) { SR = ProcWave->GetSampleRateForCurrentPlatform(); NC = ProcWave->NumChannels; } }
 
     int32 MaxQueuedSentencesAhead = 10;
-    int32 MaxQueuedAudioChunksAhead = 10;
     int32 MaxBufferedCharsWhileBackpressured = 1000;
 #endif
 
@@ -200,11 +177,13 @@ public:
     /** Returns true if this agent is currently speaking or processing LLM/TTS. */
     bool IsBusy() const
     {
-        return IsGenerationBusy() || ((AudioComp != nullptr) && AudioComp->IsPlaying());
+        return IsGenerationBusy() || !bAudioPlaybackComplete || ((AudioComp != nullptr) && AudioComp->IsPlaying());
     }
 
     UFUNCTION()
     TArray<FString> GetVoiceOptions() const;
+
+    bool IsAudioPlaybackComplete() const { return bAudioPlaybackComplete; }
 
 protected:
     virtual void BeginPlay() override;
@@ -217,9 +196,6 @@ private:
 
     UPROPERTY()
     UAudioComponent* AudioComp = nullptr;
-
-    UPROPERTY()
-    USoundWaveProcedural* ProcWave = nullptr;
 
     UPROPERTY()
     ULocalTalkerInProcGenerateAsync* ActiveLLM = nullptr;
@@ -237,23 +213,16 @@ private:
     float FlushSeconds = 0.40f;
     
     TQueue<FString, EQueueMode::Mpsc> SentenceQueue;
-    TQueue<FLocalTalkerAudioChunk, EQueueMode::Mpsc> AudioQueue;
 
     FThreadSafeBool bTTSStop = false;
     FRunnableThread* TTSThread = nullptr;
     FRunnable* TTSRunnable = nullptr;
     bool bTTSWorkerRunning = false;
-    FThreadSafeBool bProcUnderflowed = false;
 
     // Bookkeeping
     FThreadSafeCounter PendingSentenceCount;
-    FThreadSafeCounter PendingAudioChunkCount;
-    FThreadSafeBool bAudioQueueDrained = false;
     bool bNotifiedSubsystemFinished = false;
-    bool bAudioStarted = false;
-
-    int32 ProcNumChannels = 1;
-    int32 ProcSampleRate = 22050;
+    FThreadSafeBool bAudioPlaybackComplete = true;
 
     // When showing real UE subtitles from Piper audio, this is the priority passed to SubtitleManager.
     float UESubtitlePriority = 1000.0f;
@@ -261,37 +230,36 @@ private:
     // When printing debug subtitles on screen.
     float OnScreenSubtitleSeconds = 4.0f;
 
-    // Updated from the TTS worker thread; read on game thread.
-    TAtomic<uint64> LastAudioEnqueueCycles { 0 };
-
-    // Game-thread estimate of when the currently queued procedural audio should finish playing (world seconds).
-    // Used to avoid force-stopping real speech while still allowing us to recover if the audio component gets "stuck playing" on a silent tail.
-    double EstimatedAudioEndWorldSeconds = 0.0;
-    double PendingAudioDurationSeconds = 0.0;
+    // Pending playback (waiting for another speaker to finish).
+    UPROPERTY()
+    USoundWaveProcedural* PendingAudioWave = nullptr;
+    FString PendingSubtitleText;
+    float PendingSubtitleDurationSeconds = 0.0f;
+    double ActiveAudioStartWorldSeconds = 0.0;
+    float ActiveAudioDurationSeconds = 0.0f;
 
     void EnsureAudio();
-    void EnsureProcWaveFormat(int32 SampleRate, int32 NumChannels);
     void StartTTSWorker(const FLocalTalkerRuntimePaths& Paths);
     void StopTTSWorker();
     void EnqueueSentence(const FString& Sentence);
     void EnqueueSentenceInternal(const FString& Sentence, bool bBroadcast);
     void ExtractAndEnqueueSentences(bool bForceFlush);
-    void PumpAudioToProcedural();
-    void UpdateAudioCompletion();
+    void TryStartPendingAudio();
     bool IsAudioBlockedByOtherSpeaker() const;
     FString BuildPromptWithHistory(const FLocalTalkerCharacterConfig& Config, const FString& UserText) const;
-    void EmitSubtitle(const FString& Text);
+    void EmitSubtitle(const FString& Text, float DurationSeconds);
     void DebugPrintLine(const FString& Line, float Seconds, bool bNewLine) const;
     FString ResolveVoiceOnnxPath() const;
-    void HandleProcUnderflow(USoundWaveProcedural* InWave, int32 SamplesNeeded);
     bool ShouldAllowTalk() const;
+    UFUNCTION()
+    void HandleAudioFinished();
 
     UFUNCTION() void HandleLLMError(const FString& Error);
     UFUNCTION() void HandleLLMToken(const FString& Token);
     UFUNCTION() void HandleLLMDelta(const FString& Text);
     UFUNCTION() void HandleLLMCompleted(const FString& Text);
 
-    void RunPiperSentenceToAudioQueue(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, FString& OutErr);
+    void RunPiperSentenceToAudio(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, FString& OutErr);
     bool GeneratePiperAudioBytes(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, TArray<uint8>& OutBytes, int32& OutSampleRate, int32& OutNumChannels, FString& OutErr);
     FLocalTalkerRuntimePaths ResolvePaths() const;
     FLocalTalkerCharacterConfig ResolveConfig() const;

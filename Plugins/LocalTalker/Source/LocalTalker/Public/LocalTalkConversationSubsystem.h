@@ -89,6 +89,9 @@ public:
     /** Clears the history for the context this agent belongs to. */
     void ClearContextHistory(ULocalCharacterComponent* Agent);
 
+    // Internal: notify participants when a talker finishes audio so pending playback can start.
+    void NotifyAudioFinished(ULocalCharacterComponent* Talker);
+
     /** Forces everyone near a location to stop talking. */
     void InterruptProximity(const FVector& Location, float Radius);
 

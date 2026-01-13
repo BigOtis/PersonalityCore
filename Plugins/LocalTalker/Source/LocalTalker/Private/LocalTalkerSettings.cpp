@@ -16,14 +16,20 @@ ULocalTalkerSettings::ULocalTalkerSettings()
             BaseDir = Plugin->GetBaseDir();
         }
 
-        FLocalTalkVoiceOption V;
-        V.Id = TEXT("en_US-lessac-small");
-        if (!BaseDir.IsEmpty())
+        auto AddVoice = [&](const TCHAR* Id, const TCHAR* OnnxName, const TCHAR* JsonName)
         {
-            V.VoiceOnnxPath = FPaths::Combine(BaseDir, TEXT("Resources/Voices/en_US-lessac-small.onnx"));
-            V.VoiceJsonPath = FPaths::Combine(BaseDir, TEXT("Resources/Voices/en_US-lessac-small.onnx.json"));
-        }
-        Voices.Add(V);
+            FLocalTalkVoiceOption V;
+            V.Id = Id;
+            if (!BaseDir.IsEmpty())
+            {
+                V.VoiceOnnxPath = FPaths::Combine(BaseDir, TEXT("Resources/Voices"), OnnxName);
+                V.VoiceJsonPath = FPaths::Combine(BaseDir, TEXT("Resources/Voices"), JsonName);
+            }
+            Voices.Add(V);
+        };
+
+        AddVoice(TEXT("en_US-lessac-small"), TEXT("en_US-lessac-small.onnx"), TEXT("en_US-lessac-small.onnx.json"));
+        AddVoice(TEXT("is_IS-bui-medium"), TEXT("is_IS-bui-medium.onnx"), TEXT("is_IS-bui-medium.onnx.json"));
     }
 }
 

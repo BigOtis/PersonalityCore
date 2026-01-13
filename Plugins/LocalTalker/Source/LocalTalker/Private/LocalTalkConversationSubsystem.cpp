@@ -221,6 +221,22 @@ void ULocalTalkConversationSubsystem::ClearContextHistory(ULocalCharacterCompone
     }
 }
 
+void ULocalTalkConversationSubsystem::NotifyAudioFinished(ULocalCharacterComponent* Talker)
+{
+    if (!Talker) return;
+    FLocalConversationContext* Context = FindOrCreateContext(Talker);
+    if (!Context) return;
+
+    RefreshContextParticipants(*Context);
+    for (const auto& Weak : Context->Participants)
+    {
+        if (ULocalCharacterComponent* P = Weak.Get())
+        {
+            P->TryStartPendingAudio();
+        }
+    }
+}
+
 void ULocalTalkConversationSubsystem::UpdateContexts()
 {
     UWorld* W = GetWorld();
@@ -268,20 +284,18 @@ void ULocalTalkConversationSubsystem::MaintainKeepAlive()
     {
         if (Context.Participants.Num() == 0) continue;
 
-        // Don't enqueue if any participant is busy.
-        bool bAnyBusy = false;
+        // Allow one prewarm: block if anyone is generating or if more than one participant has pending audio.
+        int32 NumGenerating = 0;
+        int32 NumPendingAudio = 0;
         for (const auto& Weak : Context.Participants)
         {
             if (ULocalCharacterComponent* P = Weak.Get())
             {
-                if (P->IsGenerationBusy() || P->IsAudioPlaying())
-                {
-                    bAnyBusy = true;
-                    break;
-                }
+                if (P->IsGenerationBusy()) NumGenerating++;
+                if (!P->IsAudioPlaybackComplete()) NumPendingAudio++;
             }
         }
-        if (bAnyBusy) continue;
+        if (NumGenerating > 0 || NumPendingAudio > 1) continue;
 
         // Respect listener gating unless explicitly ignored for keep-alive.
         if (bRequireListener && !bIgnoreListener && !LocalTalkerIsAnyPlayerPawnInHearingRange(W, Context))
@@ -327,8 +341,11 @@ void ULocalTalkConversationSubsystem::MaintainKeepAlive()
         {
             if (ULocalCharacterComponent* P = Weak.Get())
             {
-                Candidate = P;
-                break;
+                if (P->IsAudioPlaybackComplete())
+                {
+                    Candidate = P;
+                    break;
+                }
             }
         }
         if (!Candidate) continue;
@@ -414,13 +431,20 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
 
     const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>();
 
-    // Don't start a new turn if someone is still busy (LLM processing or TTS speaking)
+    // Allow one prewarm: block if anyone is generating or if more than one participant has pending audio.
+    int32 NumGenerating = 0;
+    int32 NumPendingAudio = 0;
     for (auto& Weak : Context.Participants)
     {
         if (ULocalCharacterComponent* P = Weak.Get())
         {
-        if (P->IsGenerationBusy()) return;
+            if (P->IsGenerationBusy()) NumGenerating++;
+            if (!P->IsAudioPlaybackComplete()) NumPendingAudio++;
+        }
     }
+    if (NumGenerating > 0 || NumPendingAudio > 1)
+    {
+        return;
     }
 
     if (Context.History.Num() <= 0)
@@ -460,7 +484,7 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
     for (auto& Weak : Context.Participants)
     {
         ULocalCharacterComponent* Candidate = Weak.Get();
-        if (Candidate && Candidate != LastSpeaker && !Candidate->IsGenerationBusy())
+        if (Candidate && Candidate != LastSpeaker && !Candidate->IsGenerationBusy() && Candidate->IsAudioPlaybackComplete())
         {
             // Only respond if the last message was within a reasonable timeframe
             const float TimeSinceLast = GetWorld()->GetTimeSeconds() - Context.LastInteractionTime;
@@ -491,7 +515,8 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
         !LastMsg.bFromUser &&
         bAllowNpcToNpc)
     {
-        if (!bRequireListener || LocalTalkerIsAnyPlayerPawnInHearingRange(GetWorld(), Context))
+        if (LastSpeaker->IsAudioPlaybackComplete() &&
+            (!bRequireListener || LocalTalkerIsAnyPlayerPawnInHearingRange(GetWorld(), Context)))
         {
             if (!(MaxNpcTurns > 0 && Context.ConsecutiveNpcTurns > MaxNpcTurns))
             {
@@ -555,7 +580,7 @@ void ULocalTalkConversationSubsystem::ProcessTurns()
             continue;
         }
 
-        if (T->IsGenerationBusy()) continue;
+        if (T->IsBusy()) continue;
 
         FLocalConversationContext* Context = FindOrCreateContext(T);
         if (bRequireListenerAll && Context && !LocalTalkerIsAnyPlayerPawnInHearingRange(GetWorld(), *Context))
@@ -563,20 +588,30 @@ void ULocalTalkConversationSubsystem::ProcessTurns()
             continue;
         }
 
-        // Check if ANYONE in this talker's context is busy
+        // Allow one "pre-warm" generation while someone else is speaking:
+        // - Block if any participant is currently generating.
+        // - Block if more than one participant already has pending audio playback.
         bool bContextBusy = false;
         if (Context)
         {
+            int32 NumGenerating = 0;
+            int32 NumPendingAudio = 0;
             for (auto& Weak : Context->Participants)
             {
                 if (ULocalCharacterComponent* P = Weak.Get())
                 {
-                    if (P->IsGenerationBusy())
-                    {
-                        bContextBusy = true;
-                        break;
-                    }
+                    if (P->IsGenerationBusy()) NumGenerating++;
+                    if (!P->IsAudioPlaybackComplete()) NumPendingAudio++;
                 }
+            }
+
+            if (NumGenerating > 0)
+            {
+                bContextBusy = true;
+            }
+            else if (NumPendingAudio > 1)
+            {
+                bContextBusy = true;
             }
         }
 

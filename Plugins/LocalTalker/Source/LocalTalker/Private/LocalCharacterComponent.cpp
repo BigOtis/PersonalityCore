@@ -156,16 +156,33 @@ void ULocalCharacterComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
         ExtractAndEnqueueSentences(true);
     }
 
-    PumpAudioToProcedural();
-    UpdateAudioCompletion();
+    TryStartPendingAudio();
+    if (AudioComp && !bAudioPlaybackComplete)
+    {
+        if (!AudioComp->IsPlaying() && !PendingAudioWave)
+        {
+            HandleAudioFinished();
+        }
+        else if (AudioComp->IsPlaying() && ActiveAudioStartWorldSeconds > 0.0 && ActiveAudioDurationSeconds > 0.0f)
+        {
+            if (UWorld* W = GetWorld())
+            {
+                const double NowSeconds = W->GetTimeSeconds();
+                const double EndSeconds = ActiveAudioStartWorldSeconds + (double)ActiveAudioDurationSeconds + (double)FMath::Max(0.0f, AudioCompletionGraceSeconds);
+                if (NowSeconds >= EndSeconds)
+                {
+                    AudioComp->Stop();
+                    HandleAudioFinished();
+                }
+            }
+        }
+    }
 
-    // Notify the Director when this turn is text-complete (LLM done + TTS jobs done + audio queued).
-    // We allow the next speaker to start generating while audio is still playing.
+    // Notify the Director when this turn has finished LLM/TTS.
+    // Audio playback may still be in progress; this allows the next turn to prewarm while we finish playing.
     if (!bNotifiedSubsystemFinished &&
         bLLMFinished &&
-        PendingSentenceCount.GetValue() == 0 &&
-        PendingAudioChunkCount.GetValue() == 0 &&
-        bAudioQueueDrained)
+        PendingSentenceCount.GetValue() == 0)
     {
         bNotifiedSubsystemFinished = true;
         if (UWorld* W = GetWorld())
@@ -221,20 +238,7 @@ void ULocalCharacterComponent::EnsureAudio()
         AudioComp->bOverrideAttenuation = false;
     }
 
-    if (!ProcWave)
-    {
-        ProcWave = NewObject<USoundWaveProcedural>(this, TEXT("LocalTalkerProcWave"));
-        ProcWave->bLooping = false;
-        ProcWave->OnSoundWaveProceduralUnderflow.BindUObject(this, &ULocalCharacterComponent::HandleProcUnderflow);
-
-        // Default format; will be overridden once we load the first WAV chunk.
-        ProcNumChannels = 1;
-        ProcSampleRate = 22050;
-        ProcWave->NumChannels = ProcNumChannels;
-        ProcWave->SetSampleRate(ProcSampleRate);
-
-        AudioComp->SetSound(ProcWave);
-    }
+    AudioComp->OnAudioFinished.AddUniqueDynamic(this, &ULocalCharacterComponent::HandleAudioFinished);
 }
 
 FString ULocalCharacterComponent::GetSpeakerNameResolved() const
@@ -349,14 +353,15 @@ void ULocalCharacterComponent::DebugPrintLine(const FString& Line, float Seconds
     GEngine->AddOnScreenDebugMessage(Key, Seconds, FColor::Cyan, Line);
 }
 
-void ULocalCharacterComponent::EmitSubtitle(const FString& Text)
+void ULocalCharacterComponent::EmitSubtitle(const FString& Text, float DurationSeconds)
 {
     const FString Speaker = GetSpeakerNameResolved();
     OnSubtitle.Broadcast(Speaker, Text);
 
     if (bShowOnScreenSubtitles)
     {
-        DebugPrintLine(FString::Printf(TEXT("%s: %s"), *Speaker, *Text), OnScreenSubtitleSeconds, /*bNewLine*/ true);
+        const float Seconds = (DurationSeconds > 0.0f) ? DurationSeconds : OnScreenSubtitleSeconds;
+        DebugPrintLine(FString::Printf(TEXT("%s: %s"), *Speaker, *Text), Seconds, /*bNewLine*/ true);
     }
 }
 
@@ -465,6 +470,51 @@ static void LocalTalkerStripControlTokens(FString& S)
     {
         S.ReplaceInline(T, TEXT(""));
     }
+}
+
+static void LocalTalkerStripBracketTags(FString& S)
+{
+    if (S.IsEmpty()) return;
+
+    FString Out;
+    Out.Reserve(S.Len());
+
+    for (int32 i = 0; i < S.Len();)
+    {
+        if (S[i] == TEXT('['))
+        {
+            const int32 CloseIdx = S.Find(TEXT("]"), ESearchCase::IgnoreCase, ESearchDir::FromStart, i + 1);
+            if (CloseIdx != INDEX_NONE && (CloseIdx - i) <= 32)
+            {
+                FString Tag = S.Mid(i + 1, CloseIdx - i - 1);
+                Tag.TrimStartAndEndInline();
+
+                if (!Tag.IsEmpty())
+                {
+                    bool bTagOk = true;
+                    for (int32 j = 0; j < Tag.Len(); j++)
+                    {
+                        const TCHAR C = Tag[j];
+                        if (!(FChar::IsAlnum(C) || C == TEXT('_') || (j == 0 && C == TEXT('/'))))
+                        {
+                            bTagOk = false;
+                            break;
+                        }
+                    }
+                    if (bTagOk)
+                    {
+                        i = CloseIdx + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        Out.AppendChar(S[i]);
+        i++;
+    }
+
+    S = Out;
 }
 
 static bool LocalTalkerTryExtractJsonStringField(const FString& In, const FString& Key, FString& OutValue)
@@ -608,6 +658,7 @@ static FString LocalTalkerCleanSpokenText(const FString& In)
     if (S.IsEmpty()) return S;
 
     LocalTalkerStripControlTokens(S);
+    LocalTalkerStripBracketTags(S);
 
     // If the model echoed our structured metadata, try to extract the "text" field.
     if (S.StartsWith(TEXT("{")) || S.Contains(TEXT("\"text\"")))
@@ -790,6 +841,12 @@ static FString LocalTalkerCleanSpokenText(const FString& In)
     S.ReplaceInline(TEXT("\n"), TEXT(" "));
     S.ReplaceInline(TEXT("\t"), TEXT(" "));
     while (S.Contains(TEXT("  "))) S.ReplaceInline(TEXT("  "), TEXT(" "));
+    S.ReplaceInline(TEXT(" ."), TEXT("."));
+    S.ReplaceInline(TEXT(" ,"), TEXT(","));
+    S.ReplaceInline(TEXT(" !"), TEXT("!"));
+    S.ReplaceInline(TEXT(" ?"), TEXT("?"));
+    S.ReplaceInline(TEXT(" ;"), TEXT(";"));
+    S.ReplaceInline(TEXT(" :"), TEXT(":"));
     S.TrimStartAndEndInline();
 
     if (!LocalTalkerHasAlphaNum(S))
@@ -1097,25 +1154,6 @@ FString ULocalCharacterComponent::BuildPromptWithHistory(const FLocalTalkerChara
     return P;
 }
 
-void ULocalCharacterComponent::EnsureProcWaveFormat(int32 SampleRate, int32 NumChannels)
-{
-    // If unknown/invalid, keep the existing format.
-    if (SampleRate <= 0 || NumChannels <= 0) return;
-    if (!ProcWave) return;
-
-    if (ProcSampleRate == SampleRate && ProcNumChannels == NumChannels) return;
-
-    // Changing format mid-stream is risky; reset audio and restart playback.
-    if (AudioComp) AudioComp->Stop();
-    ProcWave->ResetAudio();
-    bAudioStarted = false;
-
-    ProcSampleRate = SampleRate;
-    ProcNumChannels = NumChannels;
-    ProcWave->NumChannels = ProcNumChannels;
-    ProcWave->SetSampleRate(ProcSampleRate);
-}
-
 FLocalTalkerRuntimePaths ULocalCharacterComponent::ResolvePaths() const
 {
     if (!bUseProjectSettingsPaths) return PathsOverride;
@@ -1221,7 +1259,7 @@ void ULocalCharacterComponent::Interrupt()
 {
     bInterrupted = true;
     bLLMFinished = true;
-    bProcUnderflowed = false;
+    bAudioPlaybackComplete = true;
 
     if (ActiveLLM)
     {
@@ -1234,17 +1272,14 @@ void ULocalCharacterComponent::Interrupt()
     FString Tmp;
     while (SentenceQueue.Dequeue(Tmp)) {}
 
-    FLocalTalkerAudioChunk Buf;
-    while (AudioQueue.Dequeue(Buf)) {}
-
     PendingSentenceCount.Reset();
-    PendingAudioChunkCount.Reset();
-    bAudioQueueDrained = true;
+    bAudioPlaybackComplete = true;
+    PendingAudioWave = nullptr;
+    PendingSubtitleText.Reset();
+    PendingSubtitleDurationSeconds = 0.0f;
 
     if (AudioComp) AudioComp->Stop();
-    if (ProcWave) ProcWave->ResetAudio();
 
-    bAudioStarted = false;
     ActiveLLM = nullptr;
 
     // Best-effort clear: QueueSubtitles is exported; KillSubtitles is not.
@@ -1300,7 +1335,14 @@ void ULocalCharacterComponent::SpeakTextLocal(const FString& Text)
 
     bInterrupted = false;
     bLLMFinished = true;
+    bSpokeThisTurn = false;
     bNotifiedSubsystemFinished = false;
+    bAudioPlaybackComplete = true;
+    PendingAudioWave = nullptr;
+    PendingSubtitleText.Reset();
+    PendingSubtitleDurationSeconds = 0.0f;
+    ActiveAudioStartWorldSeconds = 0.0;
+    ActiveAudioDurationSeconds = 0.0f;
 
     EnsureAudio();
     EnqueueSentence(Text);
@@ -1338,10 +1380,13 @@ void ULocalCharacterComponent::InternalGrantTurn(const FString& PromptOrText)
     bLLMFinished = false;
     bSpokeThisTurn = false;
     bNotifiedSubsystemFinished = false;
-    bAudioQueueDrained = false;
-    PendingAudioDurationSeconds = 0.0;
+    bAudioPlaybackComplete = true;
+    PendingAudioWave = nullptr;
+    PendingSubtitleText.Reset();
+    PendingSubtitleDurationSeconds = 0.0f;
+    ActiveAudioStartWorldSeconds = 0.0;
+    ActiveAudioDurationSeconds = 0.0f;
     PendingSentenceCount.Reset();
-    PendingAudioChunkCount.Reset();
 
     LLMTextBuffer.Reset();
     LLMFullText.Reset();
@@ -1489,7 +1534,15 @@ void ULocalCharacterComponent::HandleLLMCompleted(const FString& Text)
     // Flush any trailing text so it gets spoken/broadcast even if it didn't hit a terminator.
     if (!Text.IsEmpty())
     {
-        ExtractAndEnqueueSentences(/*bForceFlush*/ true);
+        if (bSpeakStreaming)
+        {
+            ExtractAndEnqueueSentences(/*bForceFlush*/ true);
+        }
+        else
+        {
+            EnqueueSentence(Text);
+            LLMTextBuffer.Reset();
+        }
     }
 }
 
@@ -1502,7 +1555,6 @@ void ULocalCharacterComponent::EnqueueSentenceInternal(const FString& Sentence, 
     PendingSentenceCount.Increment();
 
     SentenceQueue.Enqueue(S);
-    EmitSubtitle(S);
     if (bBroadcast)
     {
         bSpokeThisTurn = true;
@@ -1622,13 +1674,11 @@ class FLocalTalkerTTSWorker : public FRunnable
 public:
     FLocalTalkerTTSWorker(
         TQueue<FString, EQueueMode::Mpsc>& InSentenceQueue,
-        TQueue<ULocalCharacterComponent::FLocalTalkerAudioChunk, EQueueMode::Mpsc>& InAudioQueue,
         FThreadSafeBool& InStop,
         ULocalCharacterComponent* InOwner,
         const FLocalTalkerRuntimePaths& InPaths
     )
         : SentenceQueue(InSentenceQueue)
-        , AudioQueue(InAudioQueue)
         , bStop(InStop)
         , Owner(InOwner)
         , Paths(InPaths)
@@ -1649,7 +1699,7 @@ public:
             if (!Owner) break;
 
             FString Err;
-            Owner->RunPiperSentenceToAudioQueue(Sentence, Paths, Err);
+            Owner->RunPiperSentenceToAudio(Sentence, Paths, Err);
             if (!Err.IsEmpty())
             {
                 AsyncTask(ENamedThreads::GameThread, [Owner = Owner, Err]()
@@ -1666,7 +1716,6 @@ public:
 
 private:
     TQueue<FString, EQueueMode::Mpsc>& SentenceQueue;
-    TQueue<ULocalCharacterComponent::FLocalTalkerAudioChunk, EQueueMode::Mpsc>& AudioQueue;
     FThreadSafeBool& bStop;
     ULocalCharacterComponent* Owner = nullptr;
     FLocalTalkerRuntimePaths Paths;
@@ -1679,7 +1728,7 @@ void ULocalCharacterComponent::StartTTSWorker(const FLocalTalkerRuntimePaths& Pa
     bTTSWorkerRunning = true;
     bTTSStop = false;
 
-    TTSRunnable = new FLocalTalkerTTSWorker(SentenceQueue, AudioQueue, bTTSStop, this, Paths);
+    TTSRunnable = new FLocalTalkerTTSWorker(SentenceQueue, bTTSStop, this, Paths);
     TTSThread = FRunnableThread::Create(TTSRunnable, TEXT("LocalTalkerTTSWorker"), 0, TPri_BelowNormal);
 }
 
@@ -1704,7 +1753,7 @@ void ULocalCharacterComponent::StopTTSWorker()
     }
 }
 
-void ULocalCharacterComponent::RunPiperSentenceToAudioQueue(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, FString& OutErr)
+void ULocalCharacterComponent::RunPiperSentenceToAudio(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, FString& OutErr)
 {
     TArray<uint8> Bytes;
     int32 SampleRate = 0;
@@ -1715,62 +1764,39 @@ void ULocalCharacterComponent::RunPiperSentenceToAudioQueue(const FString& Sente
         return;
     }
 
-    // Ensure procedural wave format matches.
-    AsyncTask(ENamedThreads::GameThread, [this, SampleRate, NumChannels]()
-    {
-        EnsureAudio();
-        EnsureProcWaveFormat(SampleRate, NumChannels);
-    });
-
     const float DurationSec = (SampleRate > 0 && NumChannels > 0)
         ? ((float)Bytes.Num() / (float)(2 * NumChannels * SampleRate))
         : 0.0f;
 
-    if (bUseUESubtitles && DurationSec > 0.0f)
+    const int32 QueuedBytes = Bytes.Num();
+    const FString SentenceCopy = Sentence;
+
+    AsyncTask(ENamedThreads::GameThread, [this, Bytes = MoveTemp(Bytes), SampleRate, NumChannels, DurationSec, SentenceCopy]() mutable
     {
-        const PTRINT SubtitleId = (PTRINT)this;
-        const float Priority = UESubtitlePriority;
-        const FString Line = FString::Printf(TEXT("%s: %s"), *GetSpeakerNameResolved(), *Sentence);
-        TWeakObjectPtr<UWorld> WorldPtr = GetWorld();
+        EnsureAudio();
+        if (!AudioComp) return;
 
-        AsyncTask(ENamedThreads::GameThread, [SubtitleId, Priority, DurationSec, Line, WorldPtr]()
+        USoundWaveProcedural* Wave = NewObject<USoundWaveProcedural>(this, TEXT("LocalTalkerProcWave"));
+        Wave->bLooping = false;
+        Wave->NumChannels = NumChannels;
+        Wave->SetSampleRate(SampleRate);
+        if (Bytes.Num() > 0)
         {
-            UWorld* World = WorldPtr.Get();
-            if (!World) return;
+            Wave->QueueAudio(Bytes.GetData(), Bytes.Num());
+        }
 
-            TArray<FSubtitleCue> Cues;
-            FSubtitleCue Cue;
-            Cue.Text = FText::FromString(Line);
-            Cue.Time = 0.0f;
-            Cues.Add(Cue);
+        PendingAudioWave = Wave;
+        PendingSubtitleText = SentenceCopy;
+        PendingSubtitleDurationSeconds = DurationSec;
+        bAudioPlaybackComplete = false;
 
-            FSubtitleManager::GetSubtitleManager()->QueueSubtitles(
-                SubtitleId,
-                Priority,
-                /*bManualWordWrap*/ false,
-                /*bSingleLine*/ true,
-                DurationSec,
-                Cues,
-                /*InStartTime*/ 0.0f,
-                World->GetAudioTimeSeconds()
-            );
-        });
-    }
+        TryStartPendingAudio();
+    });
 
-    FLocalTalkerAudioChunk Chunk;
-    Chunk.Bytes = MoveTemp(Bytes);
-    Chunk.SampleRate = SampleRate;
-    Chunk.NumChannels = NumChannels;
-    Chunk.DurationSeconds = DurationSec;
-
-    PendingAudioChunkCount.Increment();
-    AudioQueue.Enqueue(MoveTemp(Chunk));
-    bAudioQueueDrained = false;
-
-    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Piper ok: %d bytes, %d ch, %d Hz (queued)"),
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Piper ok: %d bytes, %d ch, %d Hz (ready)"),
         *LocalTalkerTimePrefix(this),
         *GetSpeakerNameResolved(),
-        Chunk.Bytes.Num(),
+        QueuedBytes,
         NumChannels,
         SampleRate
     );
@@ -1884,113 +1910,81 @@ bool ULocalCharacterComponent::GeneratePiperAudioBytes(const FString& Sentence, 
     return true;
 }
 
-void ULocalCharacterComponent::PumpAudioToProcedural()
+void ULocalCharacterComponent::TryStartPendingAudio()
 {
-    EnsureAudio();
-
-    if (!AudioComp || !ProcWave) return;
     if (bInterrupted) return;
+    if (!PendingAudioWave) return;
 
-    FLocalTalkerAudioChunk Chunk;
-    bool bQueued = false;
-    double AddedDurationSeconds = 0.0;
+    EnsureAudio();
+    if (!AudioComp) return;
+    if (AudioComp->IsPlaying()) return;
+    if (IsAudioBlockedByOtherSpeaker()) return;
 
-    for (int32 i = 0; i < 8; i++)
+    AudioComp->SetSound(PendingAudioWave);
+    AudioComp->Play();
+    bAudioPlaybackComplete = false;
+    ActiveAudioStartWorldSeconds = 0.0;
+    ActiveAudioDurationSeconds = PendingSubtitleDurationSeconds;
+    if (UWorld* W = GetWorld())
     {
-        if (!AudioQueue.Dequeue(Chunk)) break;
-        if (Chunk.Bytes.Num() == 0) continue;
+        ActiveAudioStartWorldSeconds = W->GetTimeSeconds();
+    }
 
-        EnsureProcWaveFormat(Chunk.SampleRate, Chunk.NumChannels);
-        bProcUnderflowed = false;
-
-        ProcWave->QueueAudio(Chunk.Bytes.GetData(), Chunk.Bytes.Num());
-        bQueued = true;
-        PendingAudioChunkCount.Decrement();
-
-        if (UWorld* W = GetWorld())
+    if (!PendingSubtitleText.IsEmpty())
+    {
+        const float DurationSec = PendingSubtitleDurationSeconds;
+        const float SubtitleDuration = (DurationSec > 0.0f) ? (DurationSec + FMath::Max(0.0f, AudioCompletionGraceSeconds)) : DurationSec;
+        if (bUseUESubtitles && SubtitleDuration > 0.0f)
         {
-            const double Duration = Chunk.DurationSeconds;
-            if (bAudioStarted)
+            const PTRINT SubtitleId = (PTRINT)this;
+            const float Priority = UESubtitlePriority;
+            const FString Line = FString::Printf(TEXT("%s: %s"), *GetSpeakerNameResolved(), *PendingSubtitleText);
+            if (UWorld* World = GetWorld())
             {
-                const double Now = W->GetTimeSeconds();
-                const double Base = FMath::Max(EstimatedAudioEndWorldSeconds, Now);
-                EstimatedAudioEndWorldSeconds = Base + Duration;
-            }
-            else
-            {
-                AddedDurationSeconds += Duration;
+                TArray<FSubtitleCue> Cues;
+                FSubtitleCue Cue;
+                Cue.Text = FText::FromString(Line);
+                Cue.Time = 0.0f;
+                Cues.Add(Cue);
+
+                FSubtitleManager::GetSubtitleManager()->QueueSubtitles(
+                    SubtitleId,
+                    Priority,
+                    /*bManualWordWrap*/ false,
+                    /*bSingleLine*/ true,
+                    SubtitleDuration,
+                    Cues,
+                    /*InStartTime*/ 0.0f,
+                    World->GetAudioTimeSeconds()
+                );
             }
         }
+
+        EmitSubtitle(PendingSubtitleText, SubtitleDuration);
     }
 
-    if (AddedDurationSeconds > 0.0)
-    {
-        PendingAudioDurationSeconds += AddedDurationSeconds;
-    }
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Audio started (full)."), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved());
 
-    const bool bBlockedByOther = IsAudioBlockedByOtherSpeaker();
+    PendingAudioWave = nullptr;
+    PendingSubtitleText.Reset();
+    PendingSubtitleDurationSeconds = 0.0f;
+}
 
-    if (!bAudioStarted && PendingAudioDurationSeconds > 0.0f && !bBlockedByOther)
+void ULocalCharacterComponent::HandleAudioFinished()
+{
+    if (bAudioPlaybackComplete) return;
+    bAudioPlaybackComplete = true;
+    ActiveAudioStartWorldSeconds = 0.0;
+    ActiveAudioDurationSeconds = 0.0f;
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Audio stopped (completed)."), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved());
+    TryStartPendingAudio();
+    if (UWorld* W = GetWorld())
     {
-        AudioComp->SetSound(ProcWave);
-        AudioComp->Play();
-        bAudioStarted = true;
-        if (UWorld* W = GetWorld())
+        if (auto* Sub = W->GetSubsystem<ULocalTalkConversationSubsystem>())
         {
-            EstimatedAudioEndWorldSeconds = W->GetTimeSeconds() + PendingAudioDurationSeconds;
+            Sub->NotifyAudioFinished(this);
         }
-        PendingAudioDurationSeconds = 0.0;
-        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Audio started (procedural)."), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved());
     }
-
-    if (AudioQueue.IsEmpty() && PendingAudioChunkCount.GetValue() == 0)
-    {
-        bAudioQueueDrained = true;
-    }
-}
-
-void ULocalCharacterComponent::HandleProcUnderflow(USoundWaveProcedural* InWave, int32 SamplesNeeded)
-{
-    (void)InWave;
-    (void)SamplesNeeded;
-    bProcUnderflowed = true;
-}
-
-void ULocalCharacterComponent::UpdateAudioCompletion()
-{
-    if (!AudioComp || !ProcWave) return;
-    if (!bAudioStarted) return;
-    if (!bLLMFinished) return;
-    if (PendingSentenceCount.GetValue() > 0 || PendingAudioChunkCount.GetValue() > 0)
-    {
-        return;
-    }
-
-    if (!AudioComp->IsPlaying())
-    {
-        bProcUnderflowed = false;
-        bAudioStarted = false;
-        ProcWave->ResetAudio();
-        EstimatedAudioEndWorldSeconds = 0.0;
-        PendingAudioDurationSeconds = 0.0;
-        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Audio stopped (natural)."), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved());
-        return;
-    }
-
-    if (!bAudioQueueDrained) return;
-
-    const int32 AvailableBytes = ProcWave->GetAvailableAudioByteCount();
-    if (AvailableBytes > 0) return;
-
-    if (!bProcUnderflowed) return;
-
-    bProcUnderflowed = false;
-    AudioComp->Stop();
-    ProcWave->ResetAudio();
-    bAudioStarted = false;
-    EstimatedAudioEndWorldSeconds = 0.0;
-    PendingAudioDurationSeconds = 0.0;
-    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Audio stopped (underflow)."), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved());
 }
 
 bool ULocalCharacterComponent::IsAudioBlockedByOtherSpeaker() const

@@ -22,6 +22,8 @@ Saved/
 Plugins/*/Binaries/
 Plugins/*/Intermediate/
 StarterContent/
+Content/
+Packaged/
 
 # Third-party binaries (large files, downloaded separately)
 Plugins/*/ThirdParty/
