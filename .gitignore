@@ -60,3 +60,7 @@ Desktop.ini
 Plugins/LocalTalker/Resources/Models/*.gguf
 Plugins/LocalTalker/Resources/Voices/*.onnx
 Plugins/LocalTalker/Resources/Voices/*.onnx.json
+
+# Ignore local llama.cpp checkout (submodule or external source)
+ThirdPartySrc/llama.cpp/
+ThirdPartySrc/llama.cpp
