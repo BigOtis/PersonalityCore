@@ -26,6 +26,11 @@ public class LocalTalker : ModuleRules
             "AutomationTest"
         });
 
+        if (Target.bBuildEditor)
+        {
+            PrivateDependencyModuleNames.Add("UnrealEd");
+        }
+
 
         if (Target.Platform == UnrealTargetPlatform.Win64)
         {
