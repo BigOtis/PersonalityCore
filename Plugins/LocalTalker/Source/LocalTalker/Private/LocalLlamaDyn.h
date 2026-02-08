@@ -114,8 +114,6 @@ struct FLocalLlamaApi
     llama_print_system_info_fn llama_print_system_info = nullptr;
 
     // GGML backend loading (required for newer llama.cpp versions)
-    using ggml_backend_load_all_fn = void(*)(void);
-    using ggml_backend_load_all_from_path_fn = void(*)(const char*);
     ggml_backend_load_all_fn ggml_backend_load_all = nullptr;
     ggml_backend_load_all_from_path_fn ggml_backend_load_all_from_path = nullptr;
 
