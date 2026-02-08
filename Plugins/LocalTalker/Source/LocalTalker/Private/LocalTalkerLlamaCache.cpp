@@ -2,6 +2,7 @@
 #include "LocalTalkerLog.h"
 #include "LocalTalkerSettings.h"
 
+#include "HAL/PlatformFile.h"
 #include "HAL/PlatformFileManager.h"
 #include "Misc/Paths.h"
 

@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Kismet/BlueprintAsyncActionBase.h"
+#include "HAL/ThreadSafeBool.h"
 #include "LocalTalkerTypes.h"
 #include "LocalTalkerInProcAsync.generated.h"
 

@@ -1,5 +1,6 @@
 #pragma once
 #include "CoreMinimal.h"
+#include "HAL/PlatformProcess.h"
 
 struct FLocalProcPipes
 {

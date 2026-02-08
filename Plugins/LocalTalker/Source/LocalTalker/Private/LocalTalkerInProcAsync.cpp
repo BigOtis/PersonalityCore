@@ -8,6 +8,7 @@
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformMisc.h"
 #include "HAL/PlatformTime.h"
+#include "Misc/Paths.h"
 
 static TAutoConsoleVariable<int32> CVarLocalTalkerTraceConversation_InProc(
     TEXT("LocalTalker.TraceConversation"),

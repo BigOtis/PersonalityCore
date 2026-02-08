@@ -90,6 +90,16 @@ From command line (PowerShell):
   -ExecCmds="Automation RunTests LocalTalker;Quit"
 ```
 
+Run tests against the **packaged/compiled plugin** (BuildPlugin output):
+
+```powershell
+.\Tools\RunPackagedLocalTalkerTests.ps1 `
+  -EngineRoot "C:\Program Files\Epic Games\UE_5.7" `
+  -TestFilter "Plugins.LocalTalker.Dialog.E2E"
+```
+
+Use `-SkipBuild` to rerun tests quickly against the current packaged output.
+
 Or from the Unreal Editor:
 1. Open **Window → Developer Tools → Session Frontend**
 2. Go to the **Automation** tab
