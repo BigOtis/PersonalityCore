@@ -1,12 +1,15 @@
-# Bundled LLM models
+# Bundled model notes
 
-This folder is where the Fab distribution of **LocalTalker** will ship one or more default GGUF models for llama.cpp.
+This folder contains GGUF models shipped with LocalTalker.
 
-The runtime will auto-default to:
+Current default behavior:
 
-- `Resources/Models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf`
+- `BundledModelFile` in `Project Settings -> LocalTalker` selects the model by filename.
+- If `BundledModelFile` is empty or missing, runtime falls back to:
+  - `Resources/Models/Llama-3.2-3B-Instruct-Q6_K_L.gguf`
 
-If you change the bundled model name(s), update the defaults in:
+When adding or replacing models:
 
-- `Source/LocalTalker/Private/LocalCharacterComponent.cpp` (`ResolvePaths()`)
-
+1. Put `.gguf` files in this folder.
+2. Set `BundledModelFile` to the target filename.
+3. Run automation tests to confirm runtime load paths.

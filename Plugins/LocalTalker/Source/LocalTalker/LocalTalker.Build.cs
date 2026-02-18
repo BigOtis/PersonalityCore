@@ -14,6 +14,7 @@ public class LocalTalker : ModuleRules
             "Engine",
             "Projects",
             "AudioMixer",
+            "AudioCaptureCore",
             "DeveloperSettings",
             "Json",
             "JsonUtilities"

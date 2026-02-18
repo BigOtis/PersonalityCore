@@ -29,6 +29,15 @@ public:
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Voices")
     TArray<FLocalTalkVoiceOption> Voices;
 
+    // --- Microphone defaults (for upcoming player mic/STT support) ---
+    // End-user setting friendly: choose system default mic or a named device.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Microphone")
+    ELocalTalkMicInputDeviceMode MicInputDeviceMode = ELocalTalkMicInputDeviceMode::DefaultSystem;
+
+    // Device name to use when MicInputDeviceMode is Specific Device.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Microphone", meta=(GetOptions="GetMicInputDeviceOptions"))
+    FString MicInputDeviceName;
+
     // --- Conversation defaults (Director behavior) ---
     // When enabled, nearby NPCs can auto-respond to each other (not just to USER messages).
     // This is gated by MaxConsecutiveNpcTurns to avoid runaway loops.
@@ -89,4 +98,7 @@ public:
 
     UFUNCTION()
     TArray<FString> GetAvailableModelOptions() const;
+
+    UFUNCTION()
+    TArray<FString> GetMicInputDeviceOptions() const;
 };

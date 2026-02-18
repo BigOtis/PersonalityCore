@@ -12,6 +12,13 @@ enum class ELocalTalkerGpuBackend : uint8
     CUDA UMETA(DisplayName="CUDA (NVIDIA Only)")
 };
 
+UENUM(BlueprintType)
+enum class ELocalTalkMicInputDeviceMode : uint8
+{
+    DefaultSystem UMETA(DisplayName="Default (System)"),
+    NamedDevice UMETA(DisplayName="Specific Device")
+};
+
 USTRUCT(BlueprintType)
 struct FLocalTalkerCharacterConfig
 {

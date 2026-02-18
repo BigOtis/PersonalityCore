@@ -1,13 +1,16 @@
-# Bundled Piper voices
+# Bundled voice notes
 
-This folder is where the Fab distribution of **LocalTalker** will ship one or more default Piper voice models.
+This folder contains Piper voice models used by LocalTalker.
 
-The runtime will auto-default to:
+Voice resolution behavior:
 
-- `Resources/Voices/en_US-lessac-small.onnx`
+1. `ULocalCharacterComponent.VoiceId` (if set)
+2. Matching entry in `Project Settings -> LocalTalker -> Voices`
+3. First valid voice entry in `Voices`
+4. Fallback: `Resources/Voices/en_US-lessac-small.onnx`
 
-If you change the bundled voice name(s), update the defaults in:
+When adding voices:
 
-- `Source/LocalTalker/Private/LocalCharacterComponent.cpp` (`ResolvePaths()`)
-
-
+1. Copy `.onnx` (and optional `.onnx.json`) into this folder.
+2. Add/update `Voices` entries in project settings.
+3. Set component `VoiceId` where needed.

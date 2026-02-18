@@ -81,6 +81,18 @@ public:
     UPROPERTY(EditAnywhere, Category="LocalTalker|Voices", meta=(GetOptions="GetVoiceOptions"))
     FName VoiceId = NAME_None;
 
+    // If true, component uses Project Settings -> LocalTalker microphone defaults.
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Microphone")
+    bool bUseProjectSettingsMicInput = true;
+
+    // Device selection mode for player microphone input (when not using project defaults).
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Microphone")
+    ELocalTalkMicInputDeviceMode MicInputDeviceMode = ELocalTalkMicInputDeviceMode::DefaultSystem;
+
+    // Microphone device name to use when MicInputDeviceMode is Specific Device.
+    UPROPERTY(EditAnywhere, Category="LocalTalker|Microphone", meta=(GetOptions="GetMicInputDeviceOptions"))
+    FString MicInputDeviceName;
+
     UPROPERTY(EditAnywhere, Category="LocalTalker|Conversation")
     float ConversationRadius = 1500.0f;
 
@@ -182,6 +194,14 @@ public:
 
     UFUNCTION()
     TArray<FString> GetVoiceOptions() const;
+
+    // Enumerates currently available audio input devices by display name.
+    UFUNCTION()
+    TArray<FString> GetMicInputDeviceOptions() const;
+
+    // Returns the resolved microphone input device name, or empty string for system default.
+    UFUNCTION(BlueprintCallable, Category="LocalTalker|Microphone")
+    FString GetResolvedMicInputDeviceName() const;
 
     bool IsAudioPlaybackComplete() const { return bAudioPlaybackComplete; }
 

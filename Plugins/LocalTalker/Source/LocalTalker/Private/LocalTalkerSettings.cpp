@@ -1,5 +1,6 @@
 #include "LocalTalkerSettings.h"
 
+#include "AudioCaptureCore.h"
 #include "HAL/FileManager.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
@@ -62,6 +63,26 @@ TArray<FString> ULocalTalkerSettings::GetAvailableModelOptions() const
 
     IFileManager& FM = IFileManager::Get();
     FM.FindFiles(Out, *Pattern, true, false);
+    Out.Sort();
+    return Out;
+}
+
+TArray<FString> ULocalTalkerSettings::GetMicInputDeviceOptions() const
+{
+    TArray<FString> Out;
+    TArray<Audio::FCaptureDeviceInfo> Devices;
+
+    Audio::FAudioCapture Capture;
+    Capture.GetCaptureDevicesAvailable(Devices);
+
+    for (const Audio::FCaptureDeviceInfo& Device : Devices)
+    {
+        if (!Device.DeviceName.IsEmpty())
+        {
+            Out.AddUnique(Device.DeviceName);
+        }
+    }
+
     Out.Sort();
     return Out;
 }

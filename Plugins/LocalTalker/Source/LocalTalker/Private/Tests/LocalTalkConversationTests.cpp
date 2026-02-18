@@ -7,6 +7,7 @@
 #include "Components/SceneComponent.h"
 #include "LocalTalkConversationSubsystem.h"
 #include "LocalCharacterComponent.h"
+#include "LocalPlayerInteractionComponent.h"
 #if WITH_EDITOR
 #include "Editor.h"
 #endif
@@ -267,6 +268,74 @@ bool FLocalTalkConversationDistanceIsolationTest::RunTest(const FString& Paramet
     TestFalse(TEXT("Far context should not include Bob."), CharlieParticipants.Contains(Bob));
 
     CleanupTalkers(Sub, AliceActor, Alice, BobActor, Bob, CharlieActor, Charlie);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FLocalTalkPlayerInteractionComponentTest,
+    "Plugins.LocalTalker.Dialog.E2E.PlayerInteractionComponentRoutesToAI",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FLocalTalkPlayerInteractionComponentTest::RunTest(const FString& Parameters)
+{
+    UWorld* World = GetAutomationWorld();
+    if (!World)
+    {
+        AddError(TEXT("Editor world not found."));
+        return false;
+    }
+
+    ULocalTalkConversationSubsystem* Sub = World->GetSubsystem<ULocalTalkConversationSubsystem>();
+    if (!Sub)
+    {
+        AddError(TEXT("Conversation subsystem not found."));
+        return false;
+    }
+
+    AActor* AliceActor = nullptr;
+    ULocalCharacterComponent* Alice = nullptr;
+    const FVector AIBase(900000.0f, 300000.0f, 100.0f);
+    if (!SpawnTalker(*this, World, Sub, AIBase, TEXT("Alice"), AliceActor, Alice))
+    {
+        CleanupTalkers(Sub, AliceActor, Alice);
+        return false;
+    }
+
+    FActorSpawnParameters SpawnParams;
+    SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    AActor* PlayerActor = World->SpawnActor<AActor>(AActor::StaticClass(), AIBase + FVector(50.0f, 0.0f, 0.0f), FRotator::ZeroRotator, SpawnParams);
+    if (!PlayerActor)
+    {
+        AddError(TEXT("Failed to spawn player actor."));
+        CleanupTalkers(Sub, AliceActor, Alice);
+        return false;
+    }
+
+    ULocalPlayerInteractionComponent* PlayerInteraction = NewObject<ULocalPlayerInteractionComponent>(PlayerActor);
+    if (!PlayerInteraction)
+    {
+        AddError(TEXT("Failed to create LocalPlayerInteractionComponent."));
+        PlayerActor->Destroy();
+        CleanupTalkers(Sub, AliceActor, Alice);
+        return false;
+    }
+    PlayerInteraction->InteractionRange = 500.0f;
+    PlayerInteraction->RegisterComponent();
+
+    const FString PlayerPrompt = TEXT("Can you summarize the objective in one line?");
+    const bool bSent = PlayerInteraction->SpeakToNearestAI(PlayerPrompt);
+    TestTrue(TEXT("Player interaction component should submit prompt to nearest AI."), bSent);
+
+    const TArray<FLocalTalkMessage> History = Sub->GetContextHistory(Alice);
+    TestEqual(TEXT("History should contain user input routed through player component."), History.Num(), 1);
+    if (History.Num() == 1)
+    {
+        TestTrue(TEXT("History entry should be marked as user input."), History[0].bFromUser);
+        TestEqual(TEXT("History text should match player prompt."), History[0].Content, PlayerPrompt);
+    }
+
+    PlayerActor->Destroy();
+    CleanupTalkers(Sub, AliceActor, Alice);
     return true;
 }
 

@@ -6,6 +6,7 @@
 #include "LocalTalkerLog.h"
 #include "LocalTalkConversationSubsystem.h"
 
+#include "AudioCaptureCore.h"
 #include "Async/Async.h"
 #include "Engine/Engine.h"
 #include "SubtitleManager.h"
@@ -33,6 +34,29 @@ static FString QuoteArg3(const FString& S)
     FString T = S;
     T.ReplaceInline(TEXT("\""), TEXT("\\\""));
     return FString::Printf(TEXT("\"%s\""), *T);
+}
+
+static ELocalTalkMicInputDeviceMode LocalTalkerResolveMicDeviceMode(
+    const ULocalCharacterComponent* Component,
+    FString& OutNamedDevice)
+{
+    OutNamedDevice.Reset();
+    if (!Component)
+    {
+        return ELocalTalkMicInputDeviceMode::DefaultSystem;
+    }
+
+    if (Component->bUseProjectSettingsMicInput)
+    {
+        if (const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>())
+        {
+            OutNamedDevice = S->MicInputDeviceName;
+            return S->MicInputDeviceMode;
+        }
+    }
+
+    OutNamedDevice = Component->MicInputDeviceName;
+    return Component->MicInputDeviceMode;
 }
 
 static bool IsSentenceTerminator(TCHAR C)
@@ -120,6 +144,13 @@ void ULocalCharacterComponent::BeginPlay()
         *LocalTalkerTimePrefix(this),
         *GetSpeakerNameResolved(),
         *Paths.LlamaLibPath, *Paths.LlamaModelPath, *Paths.PiperExePath, *Paths.PiperVoiceModelPath, *Paths.WorkingDir
+    );
+
+    const FString ResolvedMicDevice = GetResolvedMicInputDeviceName();
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Mic input device: %s"),
+        *LocalTalkerTimePrefix(this),
+        *GetSpeakerNameResolved(),
+        ResolvedMicDevice.IsEmpty() ? TEXT("Default (System)") : *ResolvedMicDevice
     );
 
 }
@@ -287,6 +318,53 @@ TArray<FString> ULocalCharacterComponent::GetVoiceOptions() const
 
     Out.Sort();
     return Out;
+}
+
+TArray<FString> ULocalCharacterComponent::GetMicInputDeviceOptions() const
+{
+    TArray<FString> Out;
+    TArray<Audio::FCaptureDeviceInfo> Devices;
+    Audio::FAudioCapture Capture;
+    Capture.GetCaptureDevicesAvailable(Devices);
+
+    for (const Audio::FCaptureDeviceInfo& Device : Devices)
+    {
+        if (!Device.DeviceName.IsEmpty())
+        {
+            Out.AddUnique(Device.DeviceName);
+        }
+    }
+
+    Out.Sort();
+    return Out;
+}
+
+FString ULocalCharacterComponent::GetResolvedMicInputDeviceName() const
+{
+    FString DesiredName;
+    const ELocalTalkMicInputDeviceMode Mode = LocalTalkerResolveMicDeviceMode(this, DesiredName);
+    if (Mode == ELocalTalkMicInputDeviceMode::DefaultSystem)
+    {
+        return FString();
+    }
+
+    DesiredName.TrimStartAndEndInline();
+    if (DesiredName.IsEmpty())
+    {
+        return FString();
+    }
+
+    const TArray<FString> Available = GetMicInputDeviceOptions();
+    for (const FString& Name : Available)
+    {
+        if (Name.Equals(DesiredName, ESearchCase::IgnoreCase))
+        {
+            return Name;
+        }
+    }
+
+    // If requested device no longer exists, fall back to default.
+    return FString();
 }
 
 FString ULocalCharacterComponent::ResolveVoiceOnnxPath() const

@@ -1,57 +1,85 @@
-# LocalTalker (llama.cpp in-process) - Win64 quickstart
+# LocalTalker In-Process Install Guide (Win64)
 
-This package switches the default LLM backend to llama.cpp in-process.
+This guide is for projects using the in-process llama.cpp backend (`libllama.dll`) with Piper TTS.
 
-## What you still need to provide
-For licensing and size reasons, this zip does NOT ship a model or llama.cpp binaries.
+## 1) Add plugin
 
-You must provide:
-- A GGUF model file (default recommended below)
-- A built libllama (dll + import lib) or static lib, plus headers, from llama.cpp
+1. Copy `Plugins/LocalTalker` into your project's `Plugins` folder.
+2. Enable `LocalTalker` in `Edit -> Plugins`.
+3. Restart Unreal Editor.
 
-## Default recommended model
-Model family: Llama 3.1 8B Instruct (GGUF)
-Quantization: Q4_K_M (balanced, ~4.9GB)
+## 2) Verify required files
 
-Filename:
-  Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
+Minimum required runtime files:
 
-Download:
-  https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
+- `Plugins/LocalTalker/ThirdParty/llama/Win64/Release/libllama.dll`
+- `Plugins/LocalTalker/ThirdParty/llama/Win64/Release/ggml.dll`
+- `Plugins/LocalTalker/ThirdParty/llama/Win64/Release/ggml-base.dll`
+- `Plugins/LocalTalker/ThirdParty/llama/Win64/Release/ggml-cpu.dll`
+- `Plugins/LocalTalker/ThirdParty/piper/Win64/Release/piper.exe`
+- A `.gguf` model in `Plugins/LocalTalker/Resources/Models/`
+- A voice `.onnx` in `Plugins/LocalTalker/Resources/Voices/`
 
-Example location:
-  C:\AI\models\Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
+Optional GPU backends:
 
-## Building libllama on Windows
-1) Clone llama.cpp:
-   git clone https://github.com/ggml-org/llama.cpp
+- Vulkan: `ggml-vulkan.dll`
+- CUDA: `ggml-cuda.dll`
 
-2) Build DLL (CMake preset varies by version). A common pattern:
-   mkdir build && cd build
-   cmake .. -DBUILD_SHARED_LIBS=ON
-   cmake --build . --config Release
+If assets are missing, run:
 
-3) Copy outputs into the plugin:
-   Plugins/LocalTalker/ThirdParty/llama/Win64/Release/
-     - libllama.dll
-     - libllama.lib (import lib, optional for runtime-only)
-   Plugins/LocalTalker/ThirdParty/llama/include/
-     - llama.h (+ any headers it includes)
+```powershell
+.\Tools\PrepareLocalTalkerBundle.ps1
+```
 
-## Configure Unreal Project Settings
-Edit -> Project Settings -> LocalTalker
+## 3) Configure Project Settings
 
-- DefaultPaths.LlamaModelPath = your GGUF path
-- DefaultPaths.LlamaLibPath   = absolute path to libllama.dll
-  Example: C:\YourProject\Plugins\LocalTalker\ThirdParty\llama\Win64\Release\libllama.dll
+Open `Edit -> Project Settings -> LocalTalker`.
 
-- Piper paths (same as before) for TTS.
+- Set `DefaultPaths` if your binaries/models are in custom locations.
+- Set `BundledModelFile` to a model in `Resources/Models`.
+- Configure `DefaultCharacterConfig` for generation behavior.
+- Configure conversation gating/keep-alive under `Conversation`.
 
-## Test
-Add LocalCharacterComponent to an Actor.
-Call SendPromptAndSpeakStreamingInProc("Hello") on BeginPlay.
+## 4) Hook up gameplay
 
-If it errors, check:
-- libllama.dll exists and is loadable
-- dependent DLLs (if any) are in the same folder
-- model path is correct
+- Add `LocalCharacterComponent` to NPC actors.
+- Add `LocalPlayerInteractionComponent` to player actor.
+- Trigger `SpeakToNearestAI("Hello")` or call `SendPromptAndSpeakStreamingInProc(...)` directly on NPCs.
+
+## 5) Run tests
+
+Editor-cmd automation:
+
+```powershell
+& "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" `
+  "C:\Path\To\Project.uproject" `
+  -NullRHI -Unattended -NoSplash -NoPause -NoSound `
+  -ExecCmds="Automation RunTests Plugins.LocalTalker.Dialog.E2E;Quit"
+```
+
+Packaged plugin test runner:
+
+```powershell
+.\Tools\RunPackagedLocalTalkerTests.ps1 `
+  -EngineRoot "C:\Program Files\Epic Games\UE_5.7" `
+  -TestFilter "Plugins.LocalTalker.Dialog.E2E"
+```
+
+Local dependency smoke test:
+
+```powershell
+.\Tools\TestLocalTalker.ps1
+```
+
+## Troubleshooting
+
+- `Failed to load libllama.dll`:
+  - Check `DefaultPaths.LlamaLibPath`
+  - Ensure all required `ggml*.dll` dependencies are present
+- `Failed to load model`:
+  - Check `DefaultPaths.LlamaModelPath` or `BundledModelFile`
+  - Ensure the `.gguf` is complete and valid
+- `piper failed`:
+  - Check `piper.exe` and voice `.onnx` paths
+- No AI reply:
+  - Verify listener gating settings and actor proximity
