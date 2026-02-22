@@ -20,9 +20,16 @@ ULocalTalkerSettings::ULocalTalkerSettings()
             Voices.Add(V);
         };
 
-        AddVoice(TEXT("Vivian"), TEXT("Vivian"), TEXT(""));
-        AddVoice(TEXT("Cherry"), TEXT("Cherry"), TEXT(""));
-        AddVoice(TEXT("Ethan"), TEXT("Ethan"), TEXT(""));
+        // Defaults aligned with Qwen3-TTS-12Hz-0.6B-CustomVoice supported speakers.
+        AddVoice(TEXT("Aiden"), TEXT("aiden"), TEXT(""));
+        AddVoice(TEXT("Dylan"), TEXT("dylan"), TEXT(""));
+        AddVoice(TEXT("Eric"), TEXT("eric"), TEXT(""));
+        AddVoice(TEXT("OnoAnna"), TEXT("ono_anna"), TEXT(""));
+        AddVoice(TEXT("Ryan"), TEXT("ryan"), TEXT(""));
+        AddVoice(TEXT("Serena"), TEXT("serena"), TEXT(""));
+        AddVoice(TEXT("Sohee"), TEXT("sohee"), TEXT(""));
+        AddVoice(TEXT("UncleFu"), TEXT("uncle_fu"), TEXT(""));
+        AddVoice(TEXT("Vivian"), TEXT("vivian"), TEXT(""));
     }
 }
 

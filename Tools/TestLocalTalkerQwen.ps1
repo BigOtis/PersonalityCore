@@ -5,7 +5,10 @@ param(
   [string]$QwenTokenizer = "Qwen/Qwen3-TTS-Tokenizer-12Hz",
   [string]$QwenDevice = "cuda:0",
   [string]$QwenDType = "bfloat16",
-  [switch]$SkipWorkerHealth
+  [switch]$SkipWorkerHealth,
+  [switch]$SkipSynthesis,
+  [string]$SynthText = "LocalTalker Qwen synthesis test line.",
+  [string]$SynthSpeaker = "vivian"
 )
 
 $ErrorActionPreference = "Stop"
@@ -63,22 +66,89 @@ if ($SkipWorkerHealth) {
   exit 0
 }
 
-# Start worker and send a health+shutdown command over stdin.
-$tmpIn = Join-Path $env:TEMP ("localtalker_qwen_health_{0}.txt" -f ([DateTimeOffset]::Now.ToUnixTimeSeconds()))
-$healthLines = @(
-  '{"cmd":"health"}',
-  '{"cmd":"shutdown"}'
-)
-Set-Content -Path $tmpIn -Value ($healthLines -join "`n") -Encoding UTF8
+# Start worker and send health + optional synth + shutdown over stdin.
+$tmpIn = Join-Path $env:TEMP ("localtalker_qwen_req_{0}.txt" -f ([DateTimeOffset]::Now.ToUnixTimeSeconds()))
+$outDir = Join-Path $ProjectRoot "Saved\LocalTalkerTest\qwen"
+New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+$outWav = Join-Path $outDir ("qwen_test_{0}.wav" -f ([DateTimeOffset]::Now.ToUnixTimeSeconds()))
 
-$cmd = "Get-Content -Raw '$tmpIn' | & '$PythonExe' '$worker' --model '$QwenModel' --tokenizer '$QwenTokenizer' --device '$QwenDevice' --dtype '$QwenDType' --no-flash-attn"
-$out = powershell -NoProfile -Command $cmd 2>&1 | Out-String
+$reqLines = @()
+$reqLines += (@{ cmd = "health" } | ConvertTo-Json -Compress)
+if (-not $SkipSynthesis) {
+  $reqLines += (@{
+      cmd = "synthesize"
+      text = $SynthText
+      language = "Auto"
+      speaker = $SynthSpeaker
+      output_wav = $outWav
+      non_streaming_mode = $true
+    } | ConvertTo-Json -Compress)
+}
+$reqLines += (@{ cmd = "shutdown" } | ConvertTo-Json -Compress)
+
+[System.IO.File]::WriteAllText(
+  $tmpIn,
+  ($reqLines -join "`n"),
+  (New-Object System.Text.UTF8Encoding($false))
+)
+
+$cmd = "type `"$tmpIn`" | `"$PythonExe`" `"$worker`" --model `"$QwenModel`" --tokenizer `"$QwenTokenizer`" --device `"$QwenDevice`" --dtype `"$QwenDType`" --no-flash-attn"
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+  $out = (cmd.exe /c $cmd) 2>&1 | Out-String
+} finally {
+  $ErrorActionPreference = $prevEap
+}
 
 Remove-Item $tmpIn -Force -ErrorAction SilentlyContinue
 
-if ($out -notmatch '"ok"\s*:\s*true') {
-  Fail "Qwen worker health check failed. Output:`n$out"
+$jsonLines = @()
+foreach ($line in ($out -split "`r?`n")) {
+  $trim = $line.Trim()
+  if ($trim.StartsWith("{") -and $trim.EndsWith("}")) {
+    try {
+      $obj = $trim | ConvertFrom-Json -ErrorAction Stop
+      if ($obj) { $jsonLines += $obj }
+    } catch {
+      # Ignore non-JSON/noisy lines.
+    }
+  }
 }
 
+if ($jsonLines.Count -lt 1) {
+  Fail "No JSON responses received from Qwen worker. Output:`n$out"
+}
+
+if (-not $jsonLines[0].ok) {
+  Fail "Qwen worker health check failed. Response: $($jsonLines[0] | ConvertTo-Json -Compress)`nOutput:`n$out"
+}
 Ok "Qwen worker health check passed"
+
+if (-not $SkipSynthesis) {
+  if ($jsonLines.Count -lt 2) {
+    Fail "Missing synth response from Qwen worker. Output:`n$out"
+  }
+
+  $synth = $jsonLines[1]
+  if (-not $synth.ok) {
+    Fail "Qwen worker synth failed. Response: $($synth | ConvertTo-Json -Compress)`nOutput:`n$out"
+  }
+
+  $wavPath = [string]$synth.wav_path
+  if ([string]::IsNullOrWhiteSpace($wavPath)) {
+    # Fallback to requested path if worker omitted wav_path.
+    $wavPath = $outWav
+  }
+  if (!(Test-Path $wavPath)) {
+    Fail "Qwen synth reported success but WAV not found: $wavPath"
+  }
+  $wavSize = (Get-Item $wavPath).Length
+  if ($wavSize -le 44) {
+    Fail "Generated WAV is too small ($wavSize bytes): $wavPath"
+  }
+
+  Ok "Qwen synthesis generated WAV: $wavPath ($wavSize bytes)"
+}
+
 Ok "LocalTalker Qwen test completed"

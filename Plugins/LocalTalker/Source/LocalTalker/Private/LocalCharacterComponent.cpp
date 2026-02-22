@@ -15,11 +15,13 @@
 #include "Misc/Paths.h"
 #include "Misc/PathViews.h"
 #include "HAL/PlatformFileManager.h"
+#include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "Dom/JsonObject.h"
 #include "Sound/SoundAttenuation.h"
+#include "Sound/SoundWave.h"
 
 static FString LocalTalkerTimePrefix(const UObject* Obj)
 {
@@ -29,6 +31,32 @@ static FString LocalTalkerTimePrefix(const UObject* Obj)
         return TEXT("");
     }
     return FString::Printf(TEXT("[t=%.2f] "), W->GetTimeSeconds());
+}
+
+static TAutoConsoleVariable<int32> CVarLocalTalkerLogAudioTrace(
+    TEXT("LocalTalker.LogAudioTrace"),
+    1,
+    TEXT("Detailed LocalTalker audio/TTS diagnostics.\n")
+    TEXT("0: Off\n")
+    TEXT("1: On"),
+    ECVF_Default);
+
+static bool LocalTalkerShouldLogAudioTrace()
+{
+    return CVarLocalTalkerLogAudioTrace.GetValueOnAnyThread() != 0;
+}
+
+static FString LocalTalkerPreview(const FString& In, int32 MaxLen = 96)
+{
+    FString Out = In;
+    Out.ReplaceInline(TEXT("\n"), TEXT(" "));
+    Out.ReplaceInline(TEXT("\r"), TEXT(" "));
+    Out.TrimStartAndEndInline();
+    if (Out.Len() > MaxLen)
+    {
+        Out = Out.Left(MaxLen) + TEXT("...");
+    }
+    return Out;
 }
 
 
@@ -65,7 +93,9 @@ static bool LocalTalkerTryPopLine(FString& InOutBuffer, FString& OutLine)
 static bool LocalTalkerSerializeJsonLine(const TSharedRef<FJsonObject>& Obj, FString& OutLine)
 {
     OutLine.Reset();
-    TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutLine);
+    // Worker protocol is one-JSON-object-per-line; pretty-printing introduces newlines that break parsing.
+    TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+        TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&OutLine);
     if (!FJsonSerializer::Serialize(Obj, Writer))
     {
         return false;
@@ -291,6 +321,7 @@ void ULocalCharacterComponent::EnsureAudio()
 {
     AActor* Owner = GetOwner();
     if (!Owner) return;
+    const bool bTraceAudio = LocalTalkerShouldLogAudioTrace();
 
     if (!AudioComp)
     {
@@ -304,6 +335,18 @@ void ULocalCharacterComponent::EnsureAudio()
             {
                 AudioComp->AttachToComponent(Owner->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
             }
+            if (bTraceAudio)
+            {
+                UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] EnsureAudio: created UAudioComponent."),
+                    *LocalTalkerTimePrefix(this),
+                    *GetSpeakerNameResolved());
+            }
+        }
+        else if (bTraceAudio)
+        {
+            UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] EnsureAudio: using existing owner UAudioComponent."),
+                *LocalTalkerTimePrefix(this),
+                *GetSpeakerNameResolved());
         }
     }
 
@@ -331,6 +374,20 @@ void ULocalCharacterComponent::EnsureAudio()
     }
 
     AudioComp->OnAudioFinished.AddUniqueDynamic(this, &ULocalCharacterComponent::HandleAudioFinished);
+    if (bTraceAudio)
+    {
+        UE_LOG(LogLocalTalker, Log,
+            TEXT("%s[%s] EnsureAudio configured: comp=%p local=%d spatial=%d ui=%d vol=%.2f hearingRadius=%.1f playing=%d"),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved(),
+            AudioComp,
+            bUseLocalSound ? 1 : 0,
+            AudioComp->bAllowSpatialization ? 1 : 0,
+            AudioComp->bIsUISound ? 1 : 0,
+            AudioComp->VolumeMultiplier,
+            GetHearingRadius(),
+            AudioComp->IsPlaying() ? 1 : 0);
+    }
 }
 
 FString ULocalCharacterComponent::GetSpeakerNameResolved() const
@@ -537,6 +594,7 @@ void ULocalCharacterComponent::EmitSubtitle(const FString& Text, float DurationS
 {
     const FString Speaker = GetSpeakerNameResolved();
     OnSubtitle.Broadcast(Speaker, Text);
+    OnSubtitleNative.Broadcast(Speaker, Text);
 
     if (bShowOnScreenSubtitles)
     {
@@ -1777,7 +1835,12 @@ void ULocalCharacterComponent::EnqueueSentenceInternal(const FString& Sentence, 
             }
         }
     }
-    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Enqueued sentence (%d chars)"), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved(), S.Len());
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Enqueued sentence (%d chars, pending=%d): %s"),
+        *LocalTalkerTimePrefix(this),
+        *GetSpeakerNameResolved(),
+        S.Len(),
+        PendingSentenceCount.GetValue(),
+        *LocalTalkerPreview(S));
 }
 
 void ULocalCharacterComponent::EnqueueSentence(const FString& Sentence)
@@ -1897,6 +1960,13 @@ public:
 
     virtual uint32 Run() override
     {
+        if (Owner && LocalTalkerShouldLogAudioTrace())
+        {
+            UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] TTS worker thread started."),
+                *LocalTalkerTimePrefix(Owner),
+                *Owner->GetSpeakerNameResolved());
+        }
+
         while (!bStop)
         {
             FString Sentence;
@@ -1909,10 +1979,24 @@ public:
             if (bStop) break;
             if (!Owner) break;
 
+            if (LocalTalkerShouldLogAudioTrace())
+            {
+                UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] TTS worker dequeued sentence (%d chars, pending=%d): %s"),
+                    *LocalTalkerTimePrefix(Owner),
+                    *Owner->GetSpeakerNameResolved(),
+                    Sentence.Len(),
+                    Owner->PendingSentenceCount.GetValue(),
+                    *LocalTalkerPreview(Sentence));
+            }
+
             FString Err;
             Owner->RunQwenSentenceToAudio(Sentence, Paths, Err);
             if (!Err.IsEmpty())
             {
+                UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] TTS worker sentence failed: %s"),
+                    *LocalTalkerTimePrefix(Owner),
+                    *Owner->GetSpeakerNameResolved(),
+                    *Err);
                 AsyncTask(ENamedThreads::GameThread, [Owner = Owner, Err]()
                 {
                     if (Owner) Owner->OnError.Broadcast(Err);
@@ -1921,6 +2005,19 @@ public:
 
             // Mark this sentence as fully processed (either produced audio or errored).
             Owner->PendingSentenceCount.Decrement();
+            if (LocalTalkerShouldLogAudioTrace())
+            {
+                UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] TTS worker completed sentence (pending now=%d)."),
+                    *LocalTalkerTimePrefix(Owner),
+                    *Owner->GetSpeakerNameResolved(),
+                    Owner->PendingSentenceCount.GetValue());
+            }
+        }
+        if (Owner && LocalTalkerShouldLogAudioTrace())
+        {
+            UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] TTS worker thread stopped."),
+                *LocalTalkerTimePrefix(Owner),
+                *Owner->GetSpeakerNameResolved());
         }
         return 0;
     }
@@ -1934,18 +2031,57 @@ private:
 
 void ULocalCharacterComponent::StartTTSWorker(const FLocalTalkerRuntimePaths& Paths)
 {
-    if (bTTSWorkerRunning) return;
+    if (bTTSWorkerRunning)
+    {
+        if (LocalTalkerShouldLogAudioTrace())
+        {
+            UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] StartTTSWorker skipped: worker already running."),
+                *LocalTalkerTimePrefix(this),
+                *GetSpeakerNameResolved());
+        }
+        return;
+    }
 
     bTTSWorkerRunning = true;
     bTTSStop = false;
 
+    if (LocalTalkerShouldLogAudioTrace())
+    {
+        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Starting TTS worker (model='%s', tokenizer='%s', device='%s')."),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved(),
+            *Paths.QwenModelPath,
+            *Paths.QwenTokenizerPath,
+            *Paths.QwenDevice);
+    }
+
     TTSRunnable = new FLocalTalkerTTSWorker(SentenceQueue, bTTSStop, this, Paths);
     TTSThread = FRunnableThread::Create(TTSRunnable, TEXT("LocalTalkerTTSWorker"), 0, TPri_BelowNormal);
+    if (!TTSThread)
+    {
+        UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] Failed to create TTS worker thread."),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved());
+        bTTSWorkerRunning = false;
+        bTTSStop = true;
+        if (TTSRunnable)
+        {
+            delete TTSRunnable;
+            TTSRunnable = nullptr;
+        }
+    }
 }
 
 void ULocalCharacterComponent::StopTTSWorker()
 {
     if (!bTTSWorkerRunning) return;
+
+    if (LocalTalkerShouldLogAudioTrace())
+    {
+        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Stopping TTS worker."),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved());
+    }
 
     bTTSWorkerRunning = false;
     bTTSStop = true;
@@ -2041,85 +2177,142 @@ bool ULocalCharacterComponent::EnsureQwenWorker(const FLocalTalkerRuntimePaths& 
         }
     }
 
-    FString Args = QuoteArg3(WorkerScriptPath);
-    Args += TEXT(" --model ") + QuoteArg3(ModelPath);
-    if (!TokenizerPath.IsEmpty())
-    {
-        Args += TEXT(" --tokenizer ") + QuoteArg3(TokenizerPath);
-    }
-    if (!Paths.QwenDevice.IsEmpty())
-    {
-        Args += TEXT(" --device ") + QuoteArg3(Paths.QwenDevice);
-    }
-    if (!Paths.QwenDType.IsEmpty())
-    {
-        Args += TEXT(" --dtype ") + QuoteArg3(Paths.QwenDType);
-    }
-
     const ULocalTalkerSettings* Settings = GetDefault<ULocalTalkerSettings>();
-    if (Settings && Settings->bQwenUseFlashAttention)
-    {
-        Args += TEXT(" --flash-attn");
-    }
-    else
-    {
-        Args += TEXT(" --no-flash-attn");
-    }
-
-    QwenWorker = new FLocalQwenWorkerState();
-
-    FString SpawnErr;
-    if (!FLocalTalkerProcess::SpawnWithPipes(Paths.QwenPythonExePath, Args, Paths.WorkingDir, QwenWorker->Handle, QwenWorker->Pipes, SpawnErr))
-    {
-        OutErr = FString::Printf(TEXT("Failed to start Qwen worker: %s"), *SpawnErr);
-        ShutdownQwenWorker();
-        return false;
-    }
-
-    TSharedRef<FJsonObject> HealthReq = MakeShared<FJsonObject>();
-    HealthReq->SetStringField(TEXT("cmd"), TEXT("health"));
-    FString HealthLine;
-    if (!LocalTalkerSerializeJsonLine(HealthReq, HealthLine))
-    {
-        OutErr = TEXT("Failed to serialize Qwen health request.");
-        ShutdownQwenWorker();
-        return false;
-    }
-
     const double Timeout = Settings ? FMath::Max(1.0, (double)Settings->QwenRequestTimeoutSeconds) : 180.0;
-    FString HealthRespLine;
-    if (!SendQwenWorkerRequest(HealthLine, HealthRespLine, OutErr, Timeout))
+    auto StartWorkerWithRuntime = [&](const FString& Device, const FString& DType, FString& OutStartErr) -> bool
     {
+        OutStartErr.Reset();
         ShutdownQwenWorker();
+
+        FString Args = QuoteArg3(WorkerScriptPath);
+        Args += TEXT(" --model ") + QuoteArg3(ModelPath);
+        if (!TokenizerPath.IsEmpty())
+        {
+            Args += TEXT(" --tokenizer ") + QuoteArg3(TokenizerPath);
+        }
+        if (!Device.IsEmpty())
+        {
+            Args += TEXT(" --device ") + QuoteArg3(Device);
+        }
+        if (!DType.IsEmpty())
+        {
+            Args += TEXT(" --dtype ") + QuoteArg3(DType);
+        }
+        if (Settings && Settings->bQwenUseFlashAttention)
+        {
+            Args += TEXT(" --flash-attn");
+        }
+        else
+        {
+            Args += TEXT(" --no-flash-attn");
+        }
+
+        QwenWorker = new FLocalQwenWorkerState();
+
+        FString SpawnErr;
+        if (!FLocalTalkerProcess::SpawnWithPipes(Paths.QwenPythonExePath, Args, Paths.WorkingDir, QwenWorker->Handle, QwenWorker->Pipes, SpawnErr))
+        {
+            OutStartErr = FString::Printf(TEXT("Failed to start Qwen worker: %s"), *SpawnErr);
+            ShutdownQwenWorker();
+            return false;
+        }
+
+        TSharedRef<FJsonObject> HealthReq = MakeShared<FJsonObject>();
+        HealthReq->SetStringField(TEXT("cmd"), TEXT("health"));
+        FString HealthLine;
+        if (!LocalTalkerSerializeJsonLine(HealthReq, HealthLine))
+        {
+            OutStartErr = TEXT("Failed to serialize Qwen health request.");
+            ShutdownQwenWorker();
+            return false;
+        }
+
+        FString HealthRespLine;
+        if (!SendQwenWorkerRequest(HealthLine, HealthRespLine, OutStartErr, Timeout))
+        {
+            ShutdownQwenWorker();
+            return false;
+        }
+
+        TSharedPtr<FJsonObject> HealthResp;
+        if (!LocalTalkerParseJsonLine(HealthRespLine, HealthResp) || !HealthResp.IsValid())
+        {
+            OutStartErr = FString::Printf(TEXT("Invalid health response from Qwen worker: %s"), *HealthRespLine);
+            ShutdownQwenWorker();
+            return false;
+        }
+
+        bool bOk = false;
+        if (!HealthResp->TryGetBoolField(TEXT("ok"), bOk) || !bOk)
+        {
+            FString WorkerErr;
+            HealthResp->TryGetStringField(TEXT("error"), WorkerErr);
+            OutStartErr = FString::Printf(TEXT("Qwen worker health check failed: %s"), *WorkerErr);
+            ShutdownQwenWorker();
+            return false;
+        }
+
+        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen worker ready (device='%s', dtype='%s')."),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved(),
+            *Device,
+            *DType);
+        return true;
+    };
+
+    const FString RequestedDevice = Paths.QwenDevice;
+    const FString RequestedDType = Paths.QwenDType;
+    if (StartWorkerWithRuntime(RequestedDevice, RequestedDType, OutErr))
+    {
+        return true;
+    }
+
+    const bool bRequestedCpu = RequestedDevice.Equals(TEXT("cpu"), ESearchCase::IgnoreCase);
+    const bool bGpuInitFailure =
+        OutErr.Contains(TEXT("cuda"), ESearchCase::IgnoreCase) ||
+        OutErr.Contains(TEXT("CUDA"), ESearchCase::IgnoreCase) ||
+        OutErr.Contains(TEXT("Torch not compiled with CUDA enabled"), ESearchCase::IgnoreCase) ||
+        OutErr.Contains(TEXT("not compiled with CUDA"), ESearchCase::IgnoreCase) ||
+        OutErr.Contains(TEXT("device"), ESearchCase::IgnoreCase);
+
+    if (!bRequestedCpu && bGpuInitFailure)
+    {
+        const FString PrimaryErr = OutErr;
+        UE_LOG(LogLocalTalker, Warning, TEXT("%s[%s] Qwen worker init failed on device '%s'. Retrying with CPU/float32. Error: %s"),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved(),
+            *RequestedDevice,
+            *PrimaryErr);
+
+        FString CpuErr;
+        if (StartWorkerWithRuntime(TEXT("cpu"), TEXT("float32"), CpuErr))
+        {
+            return true;
+        }
+
+        OutErr = FString::Printf(TEXT("Qwen worker failed on '%s' and CPU fallback. primary='%s' fallback='%s'"),
+            *RequestedDevice,
+            *PrimaryErr,
+            *CpuErr);
         return false;
     }
 
-    TSharedPtr<FJsonObject> HealthResp;
-    if (!LocalTalkerParseJsonLine(HealthRespLine, HealthResp) || !HealthResp.IsValid())
-    {
-        OutErr = FString::Printf(TEXT("Invalid health response from Qwen worker: %s"), *HealthRespLine);
-        ShutdownQwenWorker();
-        return false;
-    }
-
-    bool bOk = false;
-    if (!HealthResp->TryGetBoolField(TEXT("ok"), bOk) || !bOk)
-    {
-        FString WorkerErr;
-        HealthResp->TryGetStringField(TEXT("error"), WorkerErr);
-        OutErr = FString::Printf(TEXT("Qwen worker health check failed: %s"), *WorkerErr);
-        ShutdownQwenWorker();
-        return false;
-    }
-
-    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen worker ready."), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved());
-    return true;
+    return false;
 }
 
 bool ULocalCharacterComponent::SendQwenWorkerRequest(const FString& RequestLine, FString& OutResponseLine, FString& OutErr, double TimeoutSeconds)
 {
     OutResponseLine.Reset();
     OutErr.Reset();
+    FString IgnoredStdoutTail;
+
+    if (LocalTalkerShouldLogAudioTrace())
+    {
+        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen request -> %s"),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved(),
+            *LocalTalkerPreview(RequestLine, 160));
+    }
 
     if (!QwenWorker || !QwenWorker->Handle.IsValid())
     {
@@ -2143,6 +2336,12 @@ bool ULocalCharacterComponent::SendQwenWorkerRequest(const FString& RequestLine,
 
     while (true)
     {
+        if (bTTSStop || bInterrupted)
+        {
+            OutErr = TEXT("Qwen request canceled (TTS stop/interrupted).");
+            return false;
+        }
+
         const FString OutChunk = FLocalTalkerProcess::ReadAvailable(QwenWorker->Pipes.ReadPipe);
         if (!OutChunk.IsEmpty())
         {
@@ -2155,7 +2354,48 @@ bool ULocalCharacterComponent::SendQwenWorkerRequest(const FString& RequestLine,
                 {
                     continue;
                 }
+
+                TSharedPtr<FJsonObject> Parsed;
+                if (!LocalTalkerParseJsonLine(Line, Parsed) || !Parsed.IsValid())
+                {
+                    FString Snippet = Line;
+                    Snippet.ReplaceInline(TEXT("\n"), TEXT(" "));
+                    Snippet.ReplaceInline(TEXT("\r"), TEXT(" "));
+                    Snippet.TrimStartAndEndInline();
+                    if (Snippet.Len() > 200)
+                    {
+                        Snippet = Snippet.Left(200) + TEXT("...");
+                    }
+
+                    UE_LOG(LogLocalTalker, Verbose, TEXT("%s[%s] Qwen worker stdout (ignored non-JSON): %s"),
+                        *LocalTalkerTimePrefix(this),
+                        *GetSpeakerNameResolved(),
+                        *Snippet);
+
+                    if (!Snippet.IsEmpty())
+                    {
+                        if (!IgnoredStdoutTail.IsEmpty())
+                        {
+                            IgnoredStdoutTail += TEXT(" | ");
+                        }
+                        IgnoredStdoutTail += Snippet;
+                        constexpr int32 MaxTailChars = 512;
+                        if (IgnoredStdoutTail.Len() > MaxTailChars)
+                        {
+                            IgnoredStdoutTail = IgnoredStdoutTail.Right(MaxTailChars);
+                        }
+                    }
+                    continue;
+                }
+
                 OutResponseLine = Line;
+                if (LocalTalkerShouldLogAudioTrace())
+                {
+                    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen response <- %s"),
+                        *LocalTalkerTimePrefix(this),
+                        *GetSpeakerNameResolved(),
+                        *LocalTalkerPreview(OutResponseLine, 200));
+                }
                 return true;
             }
         }
@@ -2173,6 +2413,10 @@ bool ULocalCharacterComponent::SendQwenWorkerRequest(const FString& RequestLine,
         if (!FPlatformProcess::IsProcRunning(QwenWorker->Handle))
         {
             OutErr = TEXT("Qwen worker exited unexpectedly.");
+            if (!IgnoredStdoutTail.IsEmpty())
+            {
+                OutErr += TEXT(" stdout: ") + IgnoredStdoutTail;
+            }
             if (!QwenWorker->StderrBuffer.IsEmpty())
             {
                 OutErr += TEXT(" stderr: ") + QwenWorker->StderrBuffer;
@@ -2183,6 +2427,10 @@ bool ULocalCharacterComponent::SendQwenWorkerRequest(const FString& RequestLine,
         if ((FPlatformTime::Seconds() - Start) >= Timeout)
         {
             OutErr = FString::Printf(TEXT("Timed out waiting for Qwen worker response (%.1fs)."), Timeout);
+            if (!IgnoredStdoutTail.IsEmpty())
+            {
+                OutErr += TEXT(" stdout: ") + IgnoredStdoutTail.Right(256);
+            }
             if (!QwenWorker->StderrBuffer.IsEmpty())
             {
                 OutErr += TEXT(" stderr: ") + QwenWorker->StderrBuffer.Right(512);
@@ -2231,12 +2479,25 @@ void ULocalCharacterComponent::ShutdownQwenWorker()
 
 void ULocalCharacterComponent::RunQwenSentenceToAudio(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, FString& OutErr)
 {
+    if (LocalTalkerShouldLogAudioTrace())
+    {
+        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] RunQwenSentenceToAudio begin (%d chars): %s"),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved(),
+            Sentence.Len(),
+            *LocalTalkerPreview(Sentence));
+    }
+
     TArray<uint8> Bytes;
     int32 SampleRate = 0;
     int32 NumChannels = 0;
 
     if (!GenerateQwenAudioBytes(Sentence, Paths, Bytes, SampleRate, NumChannels, OutErr))
     {
+        UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] RunQwenSentenceToAudio failed: %s"),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved(),
+            *OutErr);
         return;
     }
 
@@ -2250,10 +2511,18 @@ void ULocalCharacterComponent::RunQwenSentenceToAudio(const FString& Sentence, c
     AsyncTask(ENamedThreads::GameThread, [this, Bytes = MoveTemp(Bytes), SampleRate, NumChannels, DurationSec, SentenceCopy]() mutable
     {
         EnsureAudio();
-        if (!AudioComp) return;
+        if (!AudioComp)
+        {
+            UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] Audio enqueue aborted: AudioComp is null."),
+                *LocalTalkerTimePrefix(this),
+                *GetSpeakerNameResolved());
+            return;
+        }
 
         USoundWaveProcedural* Wave = NewObject<USoundWaveProcedural>(this, TEXT("LocalTalkerProcWave"));
         Wave->bLooping = false;
+        Wave->Duration = INDEFINITELY_LOOPING_DURATION;
+        Wave->SampleByteSize = sizeof(int16);
         Wave->NumChannels = NumChannels;
         Wave->SetSampleRate(SampleRate);
         if (Bytes.Num() > 0)
@@ -2265,6 +2534,17 @@ void ULocalCharacterComponent::RunQwenSentenceToAudio(const FString& Sentence, c
         PendingSubtitleText = SentenceCopy;
         PendingSubtitleDurationSeconds = DurationSec;
         bAudioPlaybackComplete = false;
+
+        if (LocalTalkerShouldLogAudioTrace())
+        {
+            UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Pending audio prepared: bytes=%d rate=%d channels=%d duration=%.2fs"),
+                *LocalTalkerTimePrefix(this),
+                *GetSpeakerNameResolved(),
+                Bytes.Num(),
+                SampleRate,
+                NumChannels,
+                DurationSec);
+        }
 
         TryStartPendingAudio();
     });
@@ -2283,8 +2563,15 @@ bool ULocalCharacterComponent::GenerateQwenAudioBytes(const FString& Sentence, c
     const ULocalTalkerSettings* Settings = GetDefault<ULocalTalkerSettings>();
     if (Settings && Settings->TtsBackend == ELocalTalkTtsBackend::PiperLegacy)
     {
-        OutErr = TEXT("Piper backend is deprecated in this build. Set TTS backend to Qwen3-TTS Worker in Project Settings -> LocalTalker.");
-        return false;
+        static bool bWarnedLegacyBackend = false;
+        if (!bWarnedLegacyBackend)
+        {
+            bWarnedLegacyBackend = true;
+            UE_LOG(LogLocalTalker, Warning,
+                TEXT("%s[%s] TTS backend is set to PiperLegacy, but this runtime is Qwen-only. Falling back to Qwen worker."),
+                *LocalTalkerTimePrefix(this),
+                *GetSpeakerNameResolved());
+        }
     }
 
     if (Sentence.IsEmpty())
@@ -2295,6 +2582,10 @@ bool ULocalCharacterComponent::GenerateQwenAudioBytes(const FString& Sentence, c
 
     if (!EnsureQwenWorker(Paths, OutErr))
     {
+        UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] EnsureQwenWorker failed: %s"),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved(),
+            *OutErr);
         return false;
     }
 
@@ -2345,6 +2636,10 @@ bool ULocalCharacterComponent::GenerateQwenAudioBytes(const FString& Sentence, c
     FString RespLine;
     if (!SendQwenWorkerRequest(ReqLine, RespLine, OutErr, Timeout))
     {
+        UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] Qwen synth request failed: %s"),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved(),
+            *OutErr);
         return false;
     }
 
@@ -2352,6 +2647,10 @@ bool ULocalCharacterComponent::GenerateQwenAudioBytes(const FString& Sentence, c
     if (!LocalTalkerParseJsonLine(RespLine, Resp) || !Resp.IsValid())
     {
         OutErr = FString::Printf(TEXT("Invalid Qwen synthesis response: %s"), *RespLine);
+        UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] %s"),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved(),
+            *OutErr);
         return false;
     }
 
@@ -2361,8 +2660,66 @@ bool ULocalCharacterComponent::GenerateQwenAudioBytes(const FString& Sentence, c
     {
         FString WorkerErr;
         Resp->TryGetStringField(TEXT("error"), WorkerErr);
-        OutErr = FString::Printf(TEXT("Qwen synthesis failed: %s"), *WorkerErr);
-        return false;
+
+        // Compatibility fallback: if a stale speaker id is configured, retry once with no explicit speaker.
+        const bool bHasRequestedSpeaker = Req->HasField(TEXT("speaker"));
+        if (bHasRequestedSpeaker && WorkerErr.Contains(TEXT("Unsupported speakers"), ESearchCase::IgnoreCase))
+        {
+            Req->RemoveField(TEXT("speaker"));
+
+            FString RetryReqLine;
+            if (!LocalTalkerSerializeJsonLine(Req, RetryReqLine))
+            {
+                OutErr = TEXT("Failed to serialize fallback Qwen synthesis request.");
+                return false;
+            }
+
+            UE_LOG(LogLocalTalker, Warning, TEXT("%s[%s] Qwen speaker was unsupported; retrying synthesis with model default speaker."),
+                *LocalTalkerTimePrefix(this),
+                *GetSpeakerNameResolved());
+
+            FString RetryRespLine;
+            if (!SendQwenWorkerRequest(RetryReqLine, RetryRespLine, OutErr, Timeout))
+            {
+                UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] Qwen synth fallback request failed: %s"),
+                    *LocalTalkerTimePrefix(this),
+                    *GetSpeakerNameResolved(),
+                    *OutErr);
+                return false;
+            }
+
+            if (!LocalTalkerParseJsonLine(RetryRespLine, Resp) || !Resp.IsValid())
+            {
+                OutErr = FString::Printf(TEXT("Invalid Qwen fallback synthesis response: %s"), *RetryRespLine);
+                UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] %s"),
+                    *LocalTalkerTimePrefix(this),
+                    *GetSpeakerNameResolved(),
+                    *OutErr);
+                return false;
+            }
+
+            Resp->TryGetBoolField(TEXT("ok"), bOk);
+            if (!bOk)
+            {
+                WorkerErr.Reset();
+                Resp->TryGetStringField(TEXT("error"), WorkerErr);
+                OutErr = FString::Printf(TEXT("Qwen synthesis failed (including fallback): %s"), *WorkerErr);
+                UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] %s"),
+                    *LocalTalkerTimePrefix(this),
+                    *GetSpeakerNameResolved(),
+                    *OutErr);
+                return false;
+            }
+        }
+        else
+        {
+            OutErr = FString::Printf(TEXT("Qwen synthesis failed: %s"), *WorkerErr);
+            UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] %s"),
+                *LocalTalkerTimePrefix(this),
+                *GetSpeakerNameResolved(),
+                *OutErr);
+            return false;
+        }
     }
 
     FString WavPath = OutWav;
@@ -2370,7 +2727,19 @@ bool ULocalCharacterComponent::GenerateQwenAudioBytes(const FString& Sentence, c
     if (WavPath.IsEmpty())
     {
         OutErr = TEXT("Qwen worker returned no wav_path.");
+        UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] %s"),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved(),
+            *OutErr);
         return false;
+    }
+
+    if (LocalTalkerShouldLogAudioTrace())
+    {
+        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen synth response wav_path='%s'"),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved(),
+            *WavPath);
     }
 
     FLocalWavPcm16 W;
@@ -2385,6 +2754,10 @@ bool ULocalCharacterComponent::GenerateQwenAudioBytes(const FString& Sentence, c
     if (W.Samples.Num() == 0)
     {
         OutErr = TEXT("Qwen worker produced an empty WAV.");
+        UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] %s"),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved(),
+            *OutErr);
         return false;
     }
 
@@ -2421,20 +2794,58 @@ bool ULocalCharacterComponent::GenerateQwenAudioBytes(const FString& Sentence, c
 
     OutSampleRate = SampleRate;
     OutNumChannels = NumChannels;
+    if (LocalTalkerShouldLogAudioTrace())
+    {
+        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] WAV decode ok: samples=%d bytes=%d rate=%d channels=%d"),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved(),
+            Use.Num(),
+            OutBytes.Num(),
+            OutSampleRate,
+            OutNumChannels);
+    }
     return true;
 }
 
 void ULocalCharacterComponent::TryStartPendingAudio()
 {
+    const bool bTraceAudio = LocalTalkerShouldLogAudioTrace();
+    static double NextBlockedLogAt = 0.0;
+
     if (bInterrupted) return;
     if (!PendingAudioWave) return;
 
     EnsureAudio();
-    if (!AudioComp) return;
+    if (!AudioComp)
+    {
+        UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] TryStartPendingAudio aborted: no AudioComp."),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved());
+        return;
+    }
     if (AudioComp->IsPlaying()) return;
-    if (IsAudioBlockedByOtherSpeaker()) return;
+    if (IsAudioBlockedByOtherSpeaker())
+    {
+        if (bTraceAudio && FPlatformTime::Seconds() >= NextBlockedLogAt)
+        {
+            NextBlockedLogAt = FPlatformTime::Seconds() + 0.5;
+            UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] TryStartPendingAudio waiting: blocked by other active speaker."),
+                *LocalTalkerTimePrefix(this),
+                *GetSpeakerNameResolved());
+        }
+        return;
+    }
 
     AudioComp->SetSound(PendingAudioWave);
+    if (bTraceAudio)
+    {
+        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] TryStartPendingAudio play request: wave=%p dur=%.2fs subtitleChars=%d"),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved(),
+            PendingAudioWave,
+            PendingSubtitleDurationSeconds,
+            PendingSubtitleText.Len());
+    }
     AudioComp->Play();
     bAudioPlaybackComplete = false;
     ActiveAudioStartWorldSeconds = 0.0;
@@ -2478,6 +2889,12 @@ void ULocalCharacterComponent::TryStartPendingAudio()
     }
 
     UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Audio started (full)."), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved());
+    if (bTraceAudio && !AudioComp->IsPlaying())
+    {
+        UE_LOG(LogLocalTalker, Warning, TEXT("%s[%s] AudioComp->Play called, but IsPlaying is false immediately after start."),
+            *LocalTalkerTimePrefix(this),
+            *GetSpeakerNameResolved());
+    }
 
     PendingAudioWave = nullptr;
     PendingSubtitleText.Reset();
@@ -2490,7 +2907,10 @@ void ULocalCharacterComponent::HandleAudioFinished()
     bAudioPlaybackComplete = true;
     ActiveAudioStartWorldSeconds = 0.0;
     ActiveAudioDurationSeconds = 0.0f;
-    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Audio stopped (completed)."), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved());
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Audio stopped (completed). pendingWave=%p"),
+        *LocalTalkerTimePrefix(this),
+        *GetSpeakerNameResolved(),
+        PendingAudioWave);
     TryStartPendingAudio();
     if (UWorld* W = GetWorld())
     {

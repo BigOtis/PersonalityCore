@@ -3,13 +3,18 @@ import argparse
 import json
 import os
 import sys
+import wave
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-import soundfile as sf
 import torch
 
 from qwen_tts import Qwen3TTSModel, VoiceClonePromptItem
+
+try:
+    import soundfile as sf
+except Exception:
+    sf = None
 
 
 def _log(msg: str) -> None:
@@ -35,11 +40,44 @@ def _to_tensor(x: Any) -> Optional[torch.Tensor]:
     return torch.tensor(x)
 
 
+def _write_wav_pcm16(path: str, wav: np.ndarray, sample_rate: int) -> None:
+    # Convert float waveform to little-endian PCM16 without external deps.
+    arr = np.asarray(wav)
+    if arr.ndim == 1:
+        channels = 1
+        pcm = np.clip(arr, -1.0, 1.0)
+        pcm_i16 = (pcm * 32767.0).astype(np.int16)
+        interleaved = pcm_i16
+    elif arr.ndim == 2:
+        # Accept either [channels, samples] or [samples, channels].
+        if arr.shape[0] <= 8 and arr.shape[0] < arr.shape[1]:
+            arr = arr.T
+        channels = int(arr.shape[1])
+        pcm = np.clip(arr, -1.0, 1.0)
+        pcm_i16 = (pcm * 32767.0).astype(np.int16)
+        interleaved = pcm_i16.reshape(-1)
+    else:
+        raise ValueError(f"Unsupported wav shape for PCM16 write: {arr.shape}")
+
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(2)
+        wf.setframerate(int(sample_rate))
+        wf.writeframes(interleaved.tobytes())
+
+
 class Worker:
     def __init__(self, model_path: str, tokenizer_path: str, device: str, dtype: str, use_flash_attn: bool):
+        resolved_device = device
+        resolved_dtype = dtype
+        if str(device).strip().lower().startswith("cuda") and not torch.cuda.is_available():
+            _log(f"Requested device '{device}' but CUDA is unavailable; falling back to CPU/float32.")
+            resolved_device = "cpu"
+            resolved_dtype = "float32"
+
         load_kwargs: Dict[str, Any] = {
-            "device_map": device,
-            "dtype": _dtype_from_str(dtype),
+            "device_map": resolved_device,
+            "dtype": _dtype_from_str(resolved_dtype),
         }
         if use_flash_attn:
             load_kwargs["attn_implementation"] = "flash_attention_2"
@@ -172,7 +210,10 @@ class Worker:
             return {"ok": False, "error": f"Unsupported model kind: {self.model_kind}"}
 
         wav = np.asarray(wavs[0], dtype=np.float32)
-        sf.write(output_wav, wav, int(sr), subtype="PCM_16")
+        if sf is not None:
+            sf.write(output_wav, wav, int(sr), subtype="PCM_16")
+        else:
+            _write_wav_pcm16(output_wav, wav, int(sr))
 
         return {
             "ok": True,

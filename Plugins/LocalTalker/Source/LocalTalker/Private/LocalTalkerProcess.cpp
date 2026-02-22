@@ -1,20 +1,38 @@
 #include "LocalTalkerProcess.h"
+#include "LocalTalkerLog.h"
 #include "HAL/PlatformProcess.h"
 #include "Misc/Paths.h"
 
 bool FLocalTalkerProcess::SpawnWithPipes(const FString& ExePath, const FString& Args, const FString& WorkingDir,
                                         FProcHandle& OutHandle, FLocalProcPipes& OutPipes, FString& OutError)
 {
+    UE_LOG(LogLocalTalker, Log, TEXT("[Proc] SpawnWithPipes exe='%s' cwd='%s' args='%s'"),
+        *ExePath, *WorkingDir, *Args);
+
     const bool bLooksLikePath = ExePath.Contains(TEXT("/")) || ExePath.Contains(TEXT("\\")) || ExePath.Contains(TEXT(":"));
     if (bLooksLikePath && !FPaths::FileExists(ExePath))
     {
         OutError = FString::Printf(TEXT("Executable not found: %s"), *ExePath);
+        UE_LOG(LogLocalTalker, Error, TEXT("[Proc] %s"), *OutError);
         return false;
     }
 
-    FPlatformProcess::CreatePipe(OutPipes.ReadPipe, OutPipes.WritePipe, true);
-    FPlatformProcess::CreatePipe(OutPipes.ReadErrPipe, OutPipes.WriteErrPipe, true);
-    FPlatformProcess::CreatePipe(OutPipes.ReadInPipe, OutPipes.WriteInPipe, true);
+    // stdout/stderr are child->parent streams, so child write handles must be inheritable (bWritePipeLocal=false).
+    const bool bStdOutPipeOk = FPlatformProcess::CreatePipe(OutPipes.ReadPipe, OutPipes.WritePipe, false);
+    const bool bStdErrPipeOk = FPlatformProcess::CreatePipe(OutPipes.ReadErrPipe, OutPipes.WriteErrPipe, false);
+    // stdin is parent->child stream, so parent write handle stays local (bWritePipeLocal=true).
+    const bool bStdInPipeOk = FPlatformProcess::CreatePipe(OutPipes.ReadInPipe, OutPipes.WriteInPipe, true);
+
+    if (!bStdOutPipeOk || !bStdErrPipeOk || !bStdInPipeOk)
+    {
+        OutError = FString::Printf(TEXT("Failed to create process pipes (stdout=%d stderr=%d stdin=%d)."),
+            bStdOutPipeOk ? 1 : 0,
+            bStdErrPipeOk ? 1 : 0,
+            bStdInPipeOk ? 1 : 0);
+        UE_LOG(LogLocalTalker, Error, TEXT("[Proc] %s"), *OutError);
+        ClosePipes(OutPipes);
+        return false;
+    }
 
     uint32 ProcessId = 0;
 
@@ -35,10 +53,12 @@ bool FLocalTalkerProcess::SpawnWithPipes(const FString& ExePath, const FString& 
     if (!OutHandle.IsValid())
     {
         OutError = FString::Printf(TEXT("Failed to spawn process: %s %s"), *ExePath, *Args);
+        UE_LOG(LogLocalTalker, Error, TEXT("[Proc] %s"), *OutError);
         ClosePipes(OutPipes);
         return false;
     }
 
+    UE_LOG(LogLocalTalker, Log, TEXT("[Proc] Spawned pid=%u (stdout/stderr/stdin wired)"), ProcessId);
     return true;
 }
 
