@@ -1,6 +1,6 @@
-# Bundled model notes
+# Bundled LLM model notes
 
-This folder contains GGUF models shipped with LocalTalker.
+This folder contains GGUF language models for LocalTalker's llama.cpp dialogue generation.
 
 Current default behavior:
 

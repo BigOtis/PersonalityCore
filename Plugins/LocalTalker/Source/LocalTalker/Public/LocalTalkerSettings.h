@@ -25,6 +25,19 @@ public:
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Defaults")
     FLocalTalkerCharacterConfig DefaultCharacterConfig;
 
+    // Active TTS backend. Defaults to Qwen worker process.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS")
+    ELocalTalkTtsBackend TtsBackend = ELocalTalkTtsBackend::QwenWorker;
+
+    // Whether the Qwen worker should request FlashAttention-2.
+    // Disable if your environment does not support it.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Qwen")
+    bool bQwenUseFlashAttention = false;
+
+    // Timeout per TTS request (seconds) when waiting for Qwen worker response.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Qwen", meta=(ClampMin="1.0"))
+    float QwenRequestTimeoutSeconds = 180.0f;
+
     // Bundled/local voice options (used to populate component dropdown).
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Voices")
     TArray<FLocalTalkVoiceOption> Voices;

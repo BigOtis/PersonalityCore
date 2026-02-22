@@ -1,9 +1,9 @@
-# LocalTalker (Win64, in-process llama.cpp + Piper)
+# LocalTalker (Win64, in-process llama.cpp + Qwen3-TTS)
 
 LocalTalker is a Blueprint-first Unreal plugin for local character conversations:
 
 - Local LLM generation with llama.cpp (in-process, streaming token deltas)
-- Local TTS with Piper (sentence-based WAV generation, procedural playback)
+- Local TTS with Qwen3-TTS via a persistent Python worker process
 - Conversation Director subsystem (turn-taking, proximity grouping, auto replies)
 - Player interaction component for routing player text to nearby AI actors
 
@@ -12,27 +12,37 @@ Tested in this repo with Unreal Engine 5.7 on Win64.
 ## Quick start (this repo)
 
 1. Open `AutoChat.uproject` (plugin is already enabled).
-2. Verify required runtime files exist:
+2. Verify core files:
    - `Plugins/LocalTalker/ThirdParty/llama/Win64/Release/libllama.dll`
-   - `Plugins/LocalTalker/ThirdParty/piper/Win64/Release/piper.exe`
    - `Plugins/LocalTalker/Resources/Models/Llama-3.2-3B-Instruct-Q6_K_L.gguf`
-   - `Plugins/LocalTalker/Resources/Voices/en_US-lessac-small.onnx`
-3. In editor, open `Edit -> Project Settings -> LocalTalker`.
-4. Add `LocalCharacterComponent` to NPC actors.
-5. Add `LocalPlayerInteractionComponent` to the player actor and call `SpeakToNearestAI(...)`.
+   - `Plugins/LocalTalker/Resources/Qwen/qwen_tts_worker.py`
+3. Install Python dependencies in your runtime environment:
+   - `pip install -r Plugins/LocalTalker/Resources/Qwen/requirements-qwen-tts.txt`
+4. In editor, open `Edit -> Project Settings -> LocalTalker` and set:
+   - `TTS.Backend = Qwen3-TTS Worker`
+   - `DefaultPaths.QwenPythonExePath` (if `python` on PATH is not sufficient)
+   - `DefaultPaths.QwenModelPath`
+   - `DefaultPaths.QwenTokenizerPath`
+   - `DefaultPaths.QwenDevice` / `DefaultPaths.QwenDType`
+5. Add `LocalCharacterComponent` to NPC actors.
+6. Add `LocalPlayerInteractionComponent` to the player actor and call `SpeakToNearestAI(...)`.
 
-## Install into another project
+## Bring-your-own voices
 
-1. Copy `Plugins/LocalTalker` into your target project's `Plugins/` folder.
-2. Enable `LocalTalker` in `Edit -> Plugins`.
-3. Restart editor when prompted.
-4. Configure runtime paths in `Project Settings -> LocalTalker` if your files are in non-default locations.
+The plugin does not create voice clones in-editor. You can bring your own by:
 
-If binaries or assets are missing, run:
+1. Generating voice prompt assets externally (for Qwen Base model) and including them in your project.
+2. Adding entries under `Project Settings -> LocalTalker -> Voices`:
+   - `Id` (dropdown/display key)
+   - `QwenSpeaker` (for CustomVoice models)
+   - `QwenInstruction` (optional style instruction)
+   - `QwenVoicePromptPath` (optional prompt file path for Base model)
+3. Selecting `VoiceId` on each `LocalCharacterComponent`.
 
-```powershell
-.\Tools\PrepareLocalTalkerBundle.ps1
-```
+Supported Qwen model modes in plugin runtime:
+- `custom_voice` (speaker IDs from model)
+- `base` (externally generated prompt assets)
+- `voice_design` is intentionally not supported.
 
 ## Runtime path behavior
 
@@ -42,10 +52,10 @@ If binaries or assets are missing, run:
 2. Per-component `PathsOverride` values (when set)
 3. Plugin defaults (if still empty), including:
    - `ThirdParty/llama/Win64/Release/libllama.dll`
-   - `ThirdParty/piper/Win64/Release/piper.exe`
-   - `Resources/Voices/en_US-lessac-small.onnx`
    - `Resources/Models/<BundledModelFile>` when set and found
    - fallback model: `Resources/Models/Llama-3.2-3B-Instruct-Q6_K_L.gguf`
+   - `Resources/Qwen/qwen_tts_worker.py`
+   - default Qwen model/tokenizer ids
 
 ## Main runtime pieces
 
@@ -65,9 +75,15 @@ If binaries or assets are missing, run:
 
 Project settings: `Edit -> Project Settings -> LocalTalker`
 
+- TTS:
+  - `TtsBackend`
+  - `bQwenUseFlashAttention`
+  - `QwenRequestTimeoutSeconds`
 - Paths:
   - `DefaultPaths`
   - `BundledModelFile` (dropdown from `Resources/Models/*.gguf`)
+- Voices:
+  - `Voices` array (`FLocalTalkVoiceOption`) for speaker/prompt selection
 - Character defaults:
   - `DefaultCharacterConfig` (sampling, max tokens, gpu backend/layers, stop sequences)
 - Conversation controls:
@@ -80,22 +96,6 @@ Project settings: `Edit -> Project Settings -> LocalTalker`
   - `MaxSilenceSeconds`
   - `bKeepAliveIgnoresPlayerListenerRequirement`
   - `ContextCleanupSeconds`
-- Performance controls:
-  - `AutoGpuLayerCap`
-  - `MinContextTokens`
-  - `MaxContextTokens`
-  - `ContextTokenMargin`
-- Voices:
-  - `Voices` array (`FLocalTalkVoiceOption`)
-- Microphone defaults:
-  - `MicInputDeviceMode`
-  - `MicInputDeviceName`
-
-Per-component overrides are available on `ULocalCharacterComponent`:
-- Paths/config overrides
-- `VoiceId`
-- Streaming chunking controls (`bSpeakStreaming`, `MinCharsBeforeSpeak`, phrase/word chunk settings)
-- Subtitle and debug options
 
 ## Automation tests
 
@@ -115,40 +115,16 @@ Run from command line:
   -ExecCmds="Automation RunTests Plugins.LocalTalker.Dialog.E2E;Quit"
 ```
 
-Or use packaged-plugin test runner:
-
-```powershell
-.\Tools\RunPackagedLocalTalkerTests.ps1 `
-  -EngineRoot "C:\Program Files\Epic Games\UE_5.7" `
-  -TestFilter "Plugins.LocalTalker.Dialog.E2E"
-```
-
-For local file/binary smoke checks:
-
-```powershell
-.\Tools\TestLocalTalker.ps1
-```
-
-## GPU notes
-
-- GPU offload is controlled by `GpuBackend` and `GpuLayers`.
-- `GpuLayers=0` uses auto mode and applies `AutoGpuLayerCap` when GPU backend is available.
-- Vulkan requires `ggml-vulkan.dll` next to `libllama.dll`.
-- CUDA requires `ggml-cuda.dll` next to `libllama.dll`.
-- If backend DLLs are present but offload is unavailable, LocalTalker falls back to CPU and logs a warning.
-
 ## Troubleshooting
 
+- "Qwen worker script not found"
+  - Check `DefaultPaths.QwenWorkerScriptPath`
+- "Failed to start Qwen worker"
+  - Check `DefaultPaths.QwenPythonExePath`
+  - Ensure Python env has `qwen-tts` and dependencies installed
+- "Qwen synthesis failed"
+  - Verify selected `QwenSpeaker` is valid for the loaded model
+  - For Base model, provide `QwenVoicePromptPath` generated externally
 - "Failed to load libllama.dll"
   - Check `DefaultPaths.LlamaLibPath`
-  - Ensure dependent DLLs are next to `libllama.dll` (`ggml*.dll`, runtime deps)
-- "Failed to load model"
-  - Check `DefaultPaths.LlamaModelPath` or `BundledModelFile`
-  - Verify `.gguf` is valid and not truncated
-- "piper failed ..."
-  - Ensure `piper.exe` and its runtime DLLs exist
-  - Ensure selected `.onnx` voice exists
-- No one responds
-  - Check listener gating settings (`bRequirePlayerListenerForAuto`, `bRequirePlayerListenerForAllTalk`)
-  - Check `ConversationRadius` / attenuation radius overlap
-  - Enable trace with `LocalTalker.TraceConversation=1`
+  - Ensure `ggml*.dll` deps are present next to `libllama.dll`

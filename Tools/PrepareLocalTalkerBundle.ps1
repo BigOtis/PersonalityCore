@@ -1,11 +1,8 @@
 param(
   [string]$ProjectRoot = $(Resolve-Path "."),
-  [string]$LlamaCppRepo = "https://github.com/ggml-org/llama.cpp",
   [string]$LlamaCppLocalPath = "",
-  [string]$PiperReleaseZipUrl = "",
   [string]$DefaultGgufUrl = "",
-  [string]$DefaultVoiceOnnxUrl = "",
-  [string]$DefaultVoiceJsonUrl = ""
+  [string]$PythonExe = "python"
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,51 +15,38 @@ function Download-If([string]$url, [string]$outFile) {
   return $true
 }
 
-$plugin = Join-Path $ProjectRoot "Plugins\\LocalTalker"
-if (!(Test-Path $plugin)) { throw "LocalTalker plugin not found at: $plugin" }
-
-# Expected bundle locations
-$llamaInclude = Join-Path $plugin "ThirdParty\\llama\\include"
-$llamaBinDir  = Join-Path $plugin "ThirdParty\\llama\\Win64\\Release"
-$piperBinDir  = Join-Path $plugin "ThirdParty\\piper\\Win64\\Release"
-$modelsDir    = Join-Path $plugin "Resources\\Models"
-$voicesDir    = Join-Path $plugin "Resources\\Voices"
-$noticesDir   = Join-Path $plugin "Resources\\ThirdPartyNotices"
-
-Ensure-Dir $llamaInclude
-Ensure-Dir $llamaBinDir
-Ensure-Dir $piperBinDir
-Ensure-Dir $modelsDir
-Ensure-Dir $voicesDir
-Ensure-Dir $noticesDir
-
-Write-Host ""
-Write-Host "=== LocalTalker bundle prep ==="
-Write-Host "Plugin: $plugin"
-Write-Host ""
-
-#
-# 1) llama.cpp headers (pinned by your own workflow)
-#
-Write-Host "Step 1: llama.cpp headers"
-Write-Host " - LocalTalker vendors llama/ggml headers in ThirdParty/llama/include/"
-Write-Host " - If you want to update llama.cpp, re-vendor headers from a pinned llama.cpp commit."
-Write-Host ""
-
-#
-# 2) Build/Copy libllama.dll (Win64)
-#
-Write-Host "Step 2: libllama.dll (Win64)"
-Write-Host " - Expecting: $llamaBinDir\\libllama.dll"
-Write-Host " - This script can optionally build it if CMake is installed and a llama.cpp path is provided."
-Write-Host "   If CMake is NOT installed, install it (or use Visual Studio's CMake) and rerun."
-
 function Find-CMake {
   $cmd = Get-Command cmake -ErrorAction SilentlyContinue
   if ($cmd) { return $cmd.Source }
   return ""
 }
 
+$plugin = Join-Path $ProjectRoot "Plugins\\LocalTalker"
+if (!(Test-Path $plugin)) { throw "LocalTalker plugin not found at: $plugin" }
+
+$llamaInclude = Join-Path $plugin "ThirdParty\\llama\\include"
+$llamaBinDir  = Join-Path $plugin "ThirdParty\\llama\\Win64\\Release"
+$modelsDir    = Join-Path $plugin "Resources\\Models"
+$voicesDir    = Join-Path $plugin "Resources\\Voices"
+$qwenDir      = Join-Path $plugin "Resources\\Qwen"
+
+Ensure-Dir $llamaInclude
+Ensure-Dir $llamaBinDir
+Ensure-Dir $modelsDir
+Ensure-Dir $voicesDir
+Ensure-Dir $qwenDir
+
+Write-Host ""
+Write-Host "=== LocalTalker bundle prep (llama + Qwen worker) ==="
+Write-Host "Plugin: $plugin"
+Write-Host ""
+
+Write-Host "Step 1: llama.cpp headers"
+Write-Host " - LocalTalker vendors llama/ggml headers in ThirdParty/llama/include/."
+Write-Host ""
+
+Write-Host "Step 2: libllama.dll (Win64)"
+Write-Host " - Expecting: $llamaBinDir\\libllama.dll"
 $cmake = Find-CMake
 if ([string]::IsNullOrWhiteSpace($cmake)) {
   Write-Host " - CMake not found on PATH. Skipping llama.cpp build."
@@ -74,7 +58,7 @@ if ([string]::IsNullOrWhiteSpace($cmake)) {
 
   if (!(Test-Path $llamaSrc)) {
     Write-Host " - llama.cpp source not found at: $llamaSrc"
-    Write-Host "   Provide -LlamaCppLocalPath, or clone to ThirdPartySrc\\llama.cpp"
+    Write-Host "   Provide -LlamaCppLocalPath or clone to ThirdPartySrc\\llama.cpp"
   } else {
     $buildDir = Join-Path $llamaSrc "build-win64"
     Ensure-Dir $buildDir
@@ -85,7 +69,6 @@ if ([string]::IsNullOrWhiteSpace($cmake)) {
     & $cmake --build . --config Release | Out-Host
     Pop-Location
 
-    # Common output locations vary; try a few.
     $candidates = @(
       Join-Path $buildDir "Release\\libllama.dll",
       Join-Path $buildDir "bin\\Release\\libllama.dll",
@@ -98,39 +81,25 @@ if ([string]::IsNullOrWhiteSpace($cmake)) {
       Copy-Item $found (Join-Path $llamaBinDir "libllama.dll") -Force
       Write-Host " - Copied: $found -> $llamaBinDir\\libllama.dll"
     } else {
-      Write-Host " - Build completed but libllama.dll wasn't found in expected locations."
-      Write-Host "   Search in: $buildDir"
+      Write-Host " - Build completed but libllama.dll was not found in expected locations."
     }
   }
 }
 Write-Host ""
 
-#
-# 3) Piper binary (Win64)
-#
-Write-Host "Step 3: Piper (Win64)"
-$piperZip = Join-Path $ProjectRoot "Saved\\LocalTalker\\piper.zip"
-Ensure-Dir (Split-Path $piperZip)
-if (Download-If $PiperReleaseZipUrl $piperZip) {
-  Write-Host "Extracting Piper zip..."
-  Expand-Archive -Path $piperZip -DestinationPath (Join-Path $ProjectRoot "Saved\\LocalTalker\\piper_extracted") -Force
-  Write-Host "Copy piper.exe (and any required DLLs) into:"
-  Write-Host " - $piperBinDir"
+Write-Host "Step 3: Default GGUF (optional)"
+Download-If $DefaultGgufUrl (Join-Path $modelsDir "Llama-3.2-3B-Instruct-Q6_K_L.gguf") | Out-Null
+Write-Host ""
+
+Write-Host "Step 4: Qwen worker dependencies"
+$req = Join-Path $qwenDir "requirements-qwen-tts.txt"
+if (Test-Path $req) {
+  Write-Host " - Installing Python deps with: $PythonExe -m pip install -r $req"
+  & $PythonExe -m pip install -r $req | Out-Host
 } else {
-  Write-Host " - Skipped (no -PiperReleaseZipUrl provided)."
+  Write-Host " - Missing requirements file: $req"
 }
 Write-Host ""
 
-#
-# 4) Default bundled model/voice
-#
-Write-Host "Step 4: Default model + voice"
-Download-If $DefaultGgufUrl (Join-Path $modelsDir "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf") | Out-Null
-Download-If $DefaultVoiceOnnxUrl (Join-Path $voicesDir "en_US-lessac-small.onnx") | Out-Null
-Download-If $DefaultVoiceJsonUrl (Join-Path $voicesDir "en_US-lessac-small.onnx.json") | Out-Null
-Write-Host ""
-
 Write-Host "Done."
-Write-Host "Next: open UE, ensure LocalTalker is enabled, and call SendPromptAndSpeakStreamingInProc()."
-
-
+Write-Host "Next: configure Project Settings -> LocalTalker -> DefaultPaths for Qwen model/tokenizer and run in-editor."

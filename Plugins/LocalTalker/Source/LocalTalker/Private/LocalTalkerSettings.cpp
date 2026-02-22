@@ -7,30 +7,22 @@
 
 ULocalTalkerSettings::ULocalTalkerSettings()
 {
-    // Provide a default voice option that matches the bundled files.
-    // (The file may be staged later; this just seeds the dropdown.)
+    // Seed a few default IDs for Qwen CustomVoice models.
+    // Users can add their own entries (speaker ids and/or externally generated prompt files).
     if (Voices.Num() == 0)
     {
-        FString BaseDir;
-        if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LocalTalker")))
-        {
-            BaseDir = Plugin->GetBaseDir();
-        }
-
-        auto AddVoice = [&](const TCHAR* Id, const TCHAR* OnnxName, const TCHAR* JsonName)
+        auto AddVoice = [&](const TCHAR* Id, const TCHAR* Speaker, const TCHAR* Instruction)
         {
             FLocalTalkVoiceOption V;
             V.Id = Id;
-            if (!BaseDir.IsEmpty())
-            {
-                V.VoiceOnnxPath = FPaths::Combine(BaseDir, TEXT("Resources/Voices"), OnnxName);
-                V.VoiceJsonPath = FPaths::Combine(BaseDir, TEXT("Resources/Voices"), JsonName);
-            }
+            V.QwenSpeaker = Speaker;
+            V.QwenInstruction = Instruction;
             Voices.Add(V);
         };
 
-        AddVoice(TEXT("en_US-lessac-small"), TEXT("en_US-lessac-small.onnx"), TEXT("en_US-lessac-small.onnx.json"));
-        AddVoice(TEXT("is_IS-bui-medium"), TEXT("is_IS-bui-medium.onnx"), TEXT("is_IS-bui-medium.onnx.json"));
+        AddVoice(TEXT("Vivian"), TEXT("Vivian"), TEXT(""));
+        AddVoice(TEXT("Cherry"), TEXT("Cherry"), TEXT(""));
+        AddVoice(TEXT("Ethan"), TEXT("Ethan"), TEXT(""));
     }
 }
 

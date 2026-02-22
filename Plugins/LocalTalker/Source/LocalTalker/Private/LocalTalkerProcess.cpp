@@ -5,7 +5,8 @@
 bool FLocalTalkerProcess::SpawnWithPipes(const FString& ExePath, const FString& Args, const FString& WorkingDir,
                                         FProcHandle& OutHandle, FLocalProcPipes& OutPipes, FString& OutError)
 {
-    if (!FPaths::FileExists(ExePath))
+    const bool bLooksLikePath = ExePath.Contains(TEXT("/")) || ExePath.Contains(TEXT("\\")) || ExePath.Contains(TEXT(":"));
+    if (bLooksLikePath && !FPaths::FileExists(ExePath))
     {
         OutError = FString::Printf(TEXT("Executable not found: %s"), *ExePath);
         return false;

@@ -3,6 +3,7 @@
 #include "LocalTalkConversationSubsystem.h"
 
 #include "Engine/World.h"
+#include "UObject/UObjectIterator.h"
 
 ULocalPlayerInteractionComponent::ULocalPlayerInteractionComponent()
 {
@@ -13,13 +14,11 @@ ULocalCharacterComponent* ULocalPlayerInteractionComponent::FindNearestAI(float 
 {
     const AActor* Owner = GetOwner();
     UWorld* World = GetWorld();
-    if (!Owner || !World)
+    if (!World && Owner)
     {
-        return nullptr;
+        World = Owner->GetWorld();
     }
-
-    ULocalTalkConversationSubsystem* Sub = World->GetSubsystem<ULocalTalkConversationSubsystem>();
-    if (!Sub)
+    if (!Owner || !World)
     {
         return nullptr;
     }
@@ -30,22 +29,29 @@ ULocalCharacterComponent* ULocalPlayerInteractionComponent::FindNearestAI(float 
 
     ULocalCharacterComponent* Best = nullptr;
     float BestDistSq = TNumericLimits<float>::Max();
-
-    for (ULocalCharacterComponent* Talker : Sub->GetRegisteredTalkers())
+    ULocalCharacterComponent* BestAny = nullptr;
+    float BestAnyDistSq = TNumericLimits<float>::Max();
+    auto ConsiderTalker = [&](ULocalCharacterComponent* Talker)
     {
         if (!Talker || !Talker->GetOwner())
         {
-            continue;
+            return;
         }
         if (Talker->GetOwner() == Owner)
         {
-            continue;
+            return;
         }
 
         const float DistSq = FVector::DistSquared(OwnerLoc, Talker->GetOwner()->GetActorLocation());
+        if (DistSq < BestAnyDistSq)
+        {
+            BestAnyDistSq = DistSq;
+            BestAny = Talker;
+        }
+
         if (DistSq > EffectiveRangeSq)
         {
-            continue;
+            return;
         }
 
         if (DistSq < BestDistSq)
@@ -53,6 +59,39 @@ ULocalCharacterComponent* ULocalPlayerInteractionComponent::FindNearestAI(float 
             BestDistSq = DistSq;
             Best = Talker;
         }
+    };
+
+    if (ULocalTalkConversationSubsystem* Sub = World->GetSubsystem<ULocalTalkConversationSubsystem>())
+    {
+        for (ULocalCharacterComponent* Talker : Sub->GetRegisteredTalkers())
+        {
+            ConsiderTalker(Talker);
+        }
+    }
+
+    // Fallback for cases where the subsystem registry is not initialized/populated yet.
+    if (!Best)
+    {
+        for (TObjectIterator<ULocalCharacterComponent> It; It; ++It)
+        {
+            ULocalCharacterComponent* Talker = *It;
+            if (!Talker || Talker->HasAnyFlags(RF_ClassDefaultObject))
+            {
+                continue;
+            }
+            if (Talker->GetWorld() != World)
+            {
+                continue;
+            }
+            ConsiderTalker(Talker);
+        }
+    }
+
+    // Rootless owner actors in editor automation can report V(0), which makes strict range checks unusable.
+    // In that case, fall back to the globally nearest candidate.
+    if (!Best && !Owner->GetRootComponent() && BestAny)
+    {
+        return BestAny;
     }
 
     return Best;
@@ -66,6 +105,18 @@ bool ULocalPlayerInteractionComponent::SpeakToAI(ULocalCharacterComponent* Targe
     }
 
     UWorld* World = GetWorld();
+    if (!World)
+    {
+        const AActor* Owner = GetOwner();
+        if (Owner)
+        {
+            World = Owner->GetWorld();
+        }
+    }
+    if (!World && TargetAI)
+    {
+        World = TargetAI->GetWorld();
+    }
     if (!World)
     {
         return false;
@@ -86,4 +137,3 @@ bool ULocalPlayerInteractionComponent::SpeakToNearestAI(const FString& PlayerTex
     ULocalCharacterComponent* Target = FindNearestAI(MaxRange);
     return SpeakToAI(Target, PlayerText);
 }
-

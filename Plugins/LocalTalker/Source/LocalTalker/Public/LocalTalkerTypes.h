@@ -19,6 +19,13 @@ enum class ELocalTalkMicInputDeviceMode : uint8
     NamedDevice UMETA(DisplayName="Specific Device")
 };
 
+UENUM(BlueprintType)
+enum class ELocalTalkTtsBackend : uint8
+{
+    QwenWorker UMETA(DisplayName="Qwen3-TTS Worker"),
+    PiperLegacy UMETA(DisplayName="Piper (Legacy, Deprecated)")
+};
+
 USTRUCT(BlueprintType)
 struct FLocalTalkerCharacterConfig
 {
@@ -111,6 +118,38 @@ struct FLocalTalkerRuntimePaths
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
     FString LlamaLibPath;
 
+    // --- Qwen3-TTS runtime ---
+    // Python executable used to launch the bundled worker script.
+    // Examples: "python", "python3", "C:/Python312/python.exe"
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Qwen")
+    FString QwenPythonExePath = TEXT("python");
+
+    // Absolute or plugin-relative path to qwen_tts_worker.py.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Qwen")
+    FString QwenWorkerScriptPath;
+
+    // HuggingFace repo id or local model folder.
+    // Example: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Qwen")
+    FString QwenModelPath = TEXT("Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice");
+
+    // Optional HuggingFace repo id or local tokenizer folder.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Qwen")
+    FString QwenTokenizerPath = TEXT("Qwen/Qwen3-TTS-Tokenizer-12Hz");
+
+    // Example: "cuda:0", "cuda", "cpu"
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Qwen")
+    FString QwenDevice = TEXT("cuda:0");
+
+    // One of: "bfloat16", "float16", "float32"
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Qwen")
+    FString QwenDType = TEXT("bfloat16");
+
+    // Default language passed to Qwen generation APIs, usually "Auto".
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Qwen")
+    FString QwenLanguage = TEXT("Auto");
+
+    // --- Legacy Piper runtime (deprecated) ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
     FString PiperExePath;
 
@@ -126,15 +165,27 @@ struct FLocalTalkVoiceOption
 {
     GENERATED_BODY()
 
-    // Stable ID shown in the component dropdown (ex: "en_US-lessac-small")
+    // Stable ID shown in component dropdowns.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Voices")
     FName Id = NAME_None;
 
-    // Absolute or plugin-relative path to the .onnx voice file.
+    // Qwen CustomVoice speaker name (as recognized by the loaded model).
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Voices|Qwen")
+    FString QwenSpeaker;
+
+    // Optional generation instruction to shape delivery/emotion.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Voices|Qwen")
+    FString QwenInstruction;
+
+    // Optional externally-generated voice prompt file path for Base model voice clone inference.
+    // The plugin does not create these prompts; users generate them offline and include them.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Voices|Qwen")
+    FString QwenVoicePromptPath;
+
+    // Legacy Piper fields kept for backward compatibility.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Voices")
     FString VoiceOnnxPath;
 
-    // Optional: voice metadata json (not required by piper.exe, but useful for UI).
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Voices")
     FString VoiceJsonPath;
 };

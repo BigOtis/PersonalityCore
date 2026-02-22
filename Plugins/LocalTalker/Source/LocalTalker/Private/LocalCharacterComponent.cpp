@@ -16,6 +16,9 @@
 #include "Misc/PathViews.h"
 #include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformTime.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
+#include "Dom/JsonObject.h"
 #include "Sound/SoundAttenuation.h"
 
 static FString LocalTalkerTimePrefix(const UObject* Obj)
@@ -34,6 +37,53 @@ static FString QuoteArg3(const FString& S)
     FString T = S;
     T.ReplaceInline(TEXT("\""), TEXT("\\\""));
     return FString::Printf(TEXT("\"%s\""), *T);
+}
+
+struct FLocalQwenWorkerState
+{
+    FProcHandle Handle;
+    FLocalProcPipes Pipes;
+    FString StdoutBuffer;
+    FString StderrBuffer;
+};
+
+static bool LocalTalkerTryPopLine(FString& InOutBuffer, FString& OutLine)
+{
+    int32 NewlineIdx = INDEX_NONE;
+    if (!InOutBuffer.FindChar(TEXT('\n'), NewlineIdx))
+    {
+        return false;
+    }
+
+    OutLine = InOutBuffer.Left(NewlineIdx);
+    InOutBuffer = InOutBuffer.Mid(NewlineIdx + 1);
+    OutLine.ReplaceInline(TEXT("\r"), TEXT(""));
+    OutLine.TrimStartAndEndInline();
+    return true;
+}
+
+static bool LocalTalkerSerializeJsonLine(const TSharedRef<FJsonObject>& Obj, FString& OutLine)
+{
+    OutLine.Reset();
+    TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutLine);
+    if (!FJsonSerializer::Serialize(Obj, Writer))
+    {
+        return false;
+    }
+    OutLine += TEXT("\n");
+    return true;
+}
+
+static bool LocalTalkerParseJsonLine(const FString& Line, TSharedPtr<FJsonObject>& OutObj)
+{
+    OutObj.Reset();
+    if (Line.IsEmpty())
+    {
+        return false;
+    }
+
+    TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Line);
+    return FJsonSerializer::Deserialize(Reader, OutObj) && OutObj.IsValid();
 }
 
 static ELocalTalkMicInputDeviceMode LocalTalkerResolveMicDeviceMode(
@@ -125,6 +175,11 @@ ULocalCharacterComponent::ULocalCharacterComponent()
     bShowOnScreenSubtitles = false;
 }
 
+ULocalCharacterComponent::~ULocalCharacterComponent()
+{
+    ShutdownQwenWorker();
+}
+
 void ULocalCharacterComponent::BeginPlay()
 {
     Super::BeginPlay();
@@ -140,10 +195,16 @@ void ULocalCharacterComponent::BeginPlay()
 
     // Quick visibility into what the component is using at runtime.
     const FLocalTalkerRuntimePaths Paths = ResolvePaths();
-    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] LocalTalker paths: LlamaLib='%s' Model='%s' PiperExe='%s' Voice='%s' WorkDir='%s'"),
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] LocalTalker paths: LlamaLib='%s' LlamaModel='%s' QwenPy='%s' QwenWorker='%s' QwenModel='%s' QwenTokenizer='%s' WorkDir='%s'"),
         *LocalTalkerTimePrefix(this),
         *GetSpeakerNameResolved(),
-        *Paths.LlamaLibPath, *Paths.LlamaModelPath, *Paths.PiperExePath, *Paths.PiperVoiceModelPath, *Paths.WorkingDir
+        *Paths.LlamaLibPath,
+        *Paths.LlamaModelPath,
+        *Paths.QwenPythonExePath,
+        *Paths.QwenWorkerScriptPath,
+        *Paths.QwenModelPath,
+        *Paths.QwenTokenizerPath,
+        *Paths.WorkingDir
     );
 
     const FString ResolvedMicDevice = GetResolvedMicInputDeviceName();
@@ -292,26 +353,35 @@ TArray<FString> ULocalCharacterComponent::GetVoiceOptions() const
         for (const FLocalTalkVoiceOption& V : S->Voices)
         {
             if (V.Id.IsNone()) continue;
-            if (!V.VoiceOnnxPath.IsEmpty() && FPaths::FileExists(V.VoiceOnnxPath))
+            const bool bHasSpeaker = !V.QwenSpeaker.IsEmpty();
+            const bool bHasPrompt = !V.QwenVoicePromptPath.IsEmpty();
+            if (bHasSpeaker || bHasPrompt)
             {
                 Out.Add(V.Id.ToString());
             }
         }
     }
 
-    // 2) Auto-discover any .onnx in the plugin voices folder
+    // 2) Auto-discover any `.voiceprompt.pt` files in plugin voices folder.
+    // These are externally-generated prompt assets for Base model inference.
     if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LocalTalker")))
     {
         const FString VoicesDir = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources/Voices"));
         TArray<FString> Found;
         IPlatformFile& PF = FPlatformFileManager::Get().GetPlatformFile();
-        PF.FindFiles(Found, *VoicesDir, TEXT(".onnx"));
-        for (const FString& Path : Found)
+        PF.FindFiles(Found, *VoicesDir, TEXT(".voiceprompt.pt"));
+        for (const FString& FoundPath : Found)
         {
-            if (!FPaths::FileExists(Path)) continue;
-            const FString Base = FString(FPathViews::GetCleanFilename(Path));
+            FString FullPath = FoundPath;
+            if (FPaths::IsRelative(FullPath))
+            {
+                FullPath = FPaths::Combine(VoicesDir, FullPath);
+            }
+            if (!FPaths::FileExists(FullPath)) continue;
+
+            const FString Base = FString(FPathViews::GetCleanFilename(FullPath));
             FString Stem = Base;
-            Stem.RemoveFromEnd(TEXT(".onnx"));
+            Stem.RemoveFromEnd(TEXT(".voiceprompt.pt"));
             Out.AddUnique(Stem);
         }
     }
@@ -367,59 +437,91 @@ FString ULocalCharacterComponent::GetResolvedMicInputDeviceName() const
     return FString();
 }
 
-FString ULocalCharacterComponent::ResolveVoiceOnnxPath() const
+bool ULocalCharacterComponent::ResolveQwenVoiceSelection(FString& OutSpeaker, FString& OutVoicePromptPath, FString& OutInstruction) const
 {
-    const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>();
+    OutSpeaker.Reset();
+    OutVoicePromptPath.Reset();
+    OutInstruction.Reset();
 
-    auto ResolveFromSettingsId = [&](FName Id) -> FString
+    const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>();
+    const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LocalTalker"));
+
+    auto NormalizePromptPath = [&](FString& InOutPath)
     {
-        if (!S || Id.IsNone()) return FString();
-        for (const FLocalTalkVoiceOption& V : S->Voices)
+        if (InOutPath.IsEmpty() || !FPaths::IsRelative(InOutPath))
         {
-            if (V.Id == Id && !V.VoiceOnnxPath.IsEmpty() && FPaths::FileExists(V.VoiceOnnxPath))
+            return;
+        }
+
+        if (Plugin.IsValid())
+        {
+            const FString Candidate = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources/Voices"), InOutPath);
+            if (FPaths::FileExists(Candidate))
             {
-                return V.VoiceOnnxPath;
+                InOutPath = Candidate;
+                return;
             }
         }
-        return FString();
+
+        InOutPath = FPaths::ConvertRelativePathToFull(InOutPath);
     };
 
-    // 1) Component override
+    auto ResolveFromSettingsId = [&](FName Id) -> bool
+    {
+        if (!S || Id.IsNone()) return false;
+        for (const FLocalTalkVoiceOption& V : S->Voices)
+        {
+            if (V.Id != Id)
+            {
+                continue;
+            }
+
+            OutSpeaker = V.QwenSpeaker;
+            OutInstruction = V.QwenInstruction;
+            OutVoicePromptPath = V.QwenVoicePromptPath;
+            NormalizePromptPath(OutVoicePromptPath);
+            return true;
+        }
+        return false;
+    };
+
+    // 1) Component-selected ID from settings.
     if (!VoiceId.IsNone())
     {
-        if (const FString P = ResolveFromSettingsId(VoiceId); !P.IsEmpty())
+        if (ResolveFromSettingsId(VoiceId))
         {
-            return P;
+            return true;
         }
 
-        // fall back to auto-discovery (Id == filename stem)
-        if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LocalTalker")))
+        // 2) Fallback: auto-discovered prompt asset by filename stem.
+        if (Plugin.IsValid())
         {
-            const FString P = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources/Voices"), VoiceId.ToString() + TEXT(".onnx"));
-            if (FPaths::FileExists(P)) return P;
+            const FString P = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources/Voices"), VoiceId.ToString() + TEXT(".voiceprompt.pt"));
+            if (FPaths::FileExists(P))
+            {
+                OutVoicePromptPath = P;
+                return true;
+            }
         }
     }
 
-    // 2) First valid voice from settings
+    // 3) First configured voice in settings.
     if (S)
     {
         for (const FLocalTalkVoiceOption& V : S->Voices)
         {
-            if (!V.Id.IsNone() && !V.VoiceOnnxPath.IsEmpty() && FPaths::FileExists(V.VoiceOnnxPath))
+            if (!V.Id.IsNone() && (!V.QwenSpeaker.IsEmpty() || !V.QwenVoicePromptPath.IsEmpty()))
             {
-                return V.VoiceOnnxPath;
+                OutSpeaker = V.QwenSpeaker;
+                OutInstruction = V.QwenInstruction;
+                OutVoicePromptPath = V.QwenVoicePromptPath;
+                NormalizePromptPath(OutVoicePromptPath);
+                return true;
             }
         }
     }
 
-    // 3) Default fallback (bundled)
-    if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LocalTalker")))
-    {
-        const FString P = FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources/Voices/en_US-lessac-small.onnx"));
-        if (FPaths::FileExists(P)) return P;
-    }
-
-    return FString();
+    return false;
 }
 
 void ULocalCharacterComponent::DebugPrintLine(const FString& Line, float Seconds, bool bNewLine) const
@@ -1241,6 +1343,13 @@ FLocalTalkerRuntimePaths ULocalCharacterComponent::ResolvePaths() const
 
     if (!PathsOverride.LlamaModelPath.IsEmpty()) Out.LlamaModelPath = PathsOverride.LlamaModelPath;
     if (!PathsOverride.LlamaLibPath.IsEmpty()) Out.LlamaLibPath = PathsOverride.LlamaLibPath;
+    if (!PathsOverride.QwenPythonExePath.IsEmpty()) Out.QwenPythonExePath = PathsOverride.QwenPythonExePath;
+    if (!PathsOverride.QwenWorkerScriptPath.IsEmpty()) Out.QwenWorkerScriptPath = PathsOverride.QwenWorkerScriptPath;
+    if (!PathsOverride.QwenModelPath.IsEmpty()) Out.QwenModelPath = PathsOverride.QwenModelPath;
+    if (!PathsOverride.QwenTokenizerPath.IsEmpty()) Out.QwenTokenizerPath = PathsOverride.QwenTokenizerPath;
+    if (!PathsOverride.QwenDevice.IsEmpty()) Out.QwenDevice = PathsOverride.QwenDevice;
+    if (!PathsOverride.QwenDType.IsEmpty()) Out.QwenDType = PathsOverride.QwenDType;
+    if (!PathsOverride.QwenLanguage.IsEmpty()) Out.QwenLanguage = PathsOverride.QwenLanguage;
     if (!PathsOverride.PiperExePath.IsEmpty()) Out.PiperExePath = PathsOverride.PiperExePath;
     if (!PathsOverride.PiperVoiceModelPath.IsEmpty()) Out.PiperVoiceModelPath = PathsOverride.PiperVoiceModelPath;
     if (!PathsOverride.WorkingDir.IsEmpty()) Out.WorkingDir = PathsOverride.WorkingDir;
@@ -1284,15 +1393,39 @@ FLocalTalkerRuntimePaths ULocalCharacterComponent::ResolvePaths() const
             Out.LlamaModelPath = FPaths::Combine(Base, TEXT("Resources/Models/Llama-3.2-3B-Instruct-Q6_K_L.gguf"));
         }
 
-        if (Out.PiperExePath.IsEmpty())
+        if (Out.QwenWorkerScriptPath.IsEmpty())
         {
-            Out.PiperExePath = FPaths::Combine(Base, TEXT("ThirdParty/piper/Win64/Release/piper.exe"));
+            Out.QwenWorkerScriptPath = FPaths::Combine(Base, TEXT("Resources/Qwen/qwen_tts_worker.py"));
         }
 
-        if (Out.PiperVoiceModelPath.IsEmpty())
+        if (Out.QwenModelPath.IsEmpty())
         {
-            // Default shipped voice model (we'll bundle at least one fast, lightweight voice)
-            Out.PiperVoiceModelPath = FPaths::Combine(Base, TEXT("Resources/Voices/en_US-lessac-small.onnx"));
+            Out.QwenModelPath = TEXT("Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice");
+        }
+
+        if (Out.QwenTokenizerPath.IsEmpty())
+        {
+            Out.QwenTokenizerPath = TEXT("Qwen/Qwen3-TTS-Tokenizer-12Hz");
+        }
+
+        if (Out.QwenPythonExePath.IsEmpty())
+        {
+            Out.QwenPythonExePath = TEXT("python");
+        }
+
+        if (Out.QwenDevice.IsEmpty())
+        {
+            Out.QwenDevice = TEXT("cuda:0");
+        }
+
+        if (Out.QwenDType.IsEmpty())
+        {
+            Out.QwenDType = TEXT("bfloat16");
+        }
+
+        if (Out.QwenLanguage.IsEmpty())
+        {
+            Out.QwenLanguage = TEXT("Auto");
         }
     }
 
@@ -1629,7 +1762,7 @@ void ULocalCharacterComponent::EnqueueSentenceInternal(const FString& Sentence, 
     const FString S = LocalTalkerCleanSpokenText(Sentence);
     if (S.Len() <= 0) return;
 
-    // PendingSentenceCount represents sentences that still need TTS completion (including in-flight piper work).
+    // PendingSentenceCount represents sentences that still need TTS completion (including in-flight worker synthesis).
     PendingSentenceCount.Increment();
 
     SentenceQueue.Enqueue(S);
@@ -1777,7 +1910,7 @@ public:
             if (!Owner) break;
 
             FString Err;
-            Owner->RunPiperSentenceToAudio(Sentence, Paths, Err);
+            Owner->RunQwenSentenceToAudio(Sentence, Paths, Err);
             if (!Err.IsEmpty())
             {
                 AsyncTask(ENamedThreads::GameThread, [Owner = Owner, Err]()
@@ -1829,15 +1962,280 @@ void ULocalCharacterComponent::StopTTSWorker()
         delete TTSRunnable;
         TTSRunnable = nullptr;
     }
+
+    ShutdownQwenWorker();
 }
 
-void ULocalCharacterComponent::RunPiperSentenceToAudio(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, FString& OutErr)
+bool ULocalCharacterComponent::EnsureQwenWorker(const FLocalTalkerRuntimePaths& Paths, FString& OutErr)
+{
+    OutErr.Reset();
+
+    if (QwenWorker &&
+        QwenWorker->Handle.IsValid() &&
+        FPlatformProcess::IsProcRunning(QwenWorker->Handle))
+    {
+        return true;
+    }
+
+    ShutdownQwenWorker();
+
+    FString WorkerScriptPath = Paths.QwenWorkerScriptPath;
+    if (FPaths::IsRelative(WorkerScriptPath))
+    {
+        if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LocalTalker")))
+        {
+            const FString Candidate = FPaths::Combine(Plugin->GetBaseDir(), WorkerScriptPath);
+            if (FPaths::FileExists(Candidate))
+            {
+                WorkerScriptPath = Candidate;
+            }
+            else
+            {
+                WorkerScriptPath = FPaths::ConvertRelativePathToFull(WorkerScriptPath);
+            }
+        }
+        else
+        {
+            WorkerScriptPath = FPaths::ConvertRelativePathToFull(WorkerScriptPath);
+        }
+    }
+    if (WorkerScriptPath.IsEmpty() || !FPaths::FileExists(WorkerScriptPath))
+    {
+        OutErr = FString::Printf(TEXT("Qwen worker script not found: %s"), *WorkerScriptPath);
+        return false;
+    }
+    if (Paths.QwenPythonExePath.IsEmpty())
+    {
+        OutErr = TEXT("QwenPythonExePath is empty. Configure Project Settings -> LocalTalker -> DefaultPaths.");
+        return false;
+    }
+    if (Paths.QwenModelPath.IsEmpty())
+    {
+        OutErr = TEXT("QwenModelPath is empty. Configure Project Settings -> LocalTalker -> DefaultPaths.");
+        return false;
+    }
+
+    FString ModelPath = Paths.QwenModelPath;
+    if (FPaths::IsRelative(ModelPath))
+    {
+        if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LocalTalker")))
+        {
+            const FString Candidate = FPaths::Combine(Plugin->GetBaseDir(), ModelPath);
+            if (FPaths::DirectoryExists(Candidate) || FPaths::FileExists(Candidate))
+            {
+                ModelPath = Candidate;
+            }
+        }
+    }
+
+    FString TokenizerPath = Paths.QwenTokenizerPath;
+    if (FPaths::IsRelative(TokenizerPath))
+    {
+        if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LocalTalker")))
+        {
+            const FString Candidate = FPaths::Combine(Plugin->GetBaseDir(), TokenizerPath);
+            if (FPaths::DirectoryExists(Candidate) || FPaths::FileExists(Candidate))
+            {
+                TokenizerPath = Candidate;
+            }
+        }
+    }
+
+    FString Args = QuoteArg3(WorkerScriptPath);
+    Args += TEXT(" --model ") + QuoteArg3(ModelPath);
+    if (!TokenizerPath.IsEmpty())
+    {
+        Args += TEXT(" --tokenizer ") + QuoteArg3(TokenizerPath);
+    }
+    if (!Paths.QwenDevice.IsEmpty())
+    {
+        Args += TEXT(" --device ") + QuoteArg3(Paths.QwenDevice);
+    }
+    if (!Paths.QwenDType.IsEmpty())
+    {
+        Args += TEXT(" --dtype ") + QuoteArg3(Paths.QwenDType);
+    }
+
+    const ULocalTalkerSettings* Settings = GetDefault<ULocalTalkerSettings>();
+    if (Settings && Settings->bQwenUseFlashAttention)
+    {
+        Args += TEXT(" --flash-attn");
+    }
+    else
+    {
+        Args += TEXT(" --no-flash-attn");
+    }
+
+    QwenWorker = new FLocalQwenWorkerState();
+
+    FString SpawnErr;
+    if (!FLocalTalkerProcess::SpawnWithPipes(Paths.QwenPythonExePath, Args, Paths.WorkingDir, QwenWorker->Handle, QwenWorker->Pipes, SpawnErr))
+    {
+        OutErr = FString::Printf(TEXT("Failed to start Qwen worker: %s"), *SpawnErr);
+        ShutdownQwenWorker();
+        return false;
+    }
+
+    TSharedRef<FJsonObject> HealthReq = MakeShared<FJsonObject>();
+    HealthReq->SetStringField(TEXT("cmd"), TEXT("health"));
+    FString HealthLine;
+    if (!LocalTalkerSerializeJsonLine(HealthReq, HealthLine))
+    {
+        OutErr = TEXT("Failed to serialize Qwen health request.");
+        ShutdownQwenWorker();
+        return false;
+    }
+
+    const double Timeout = Settings ? FMath::Max(1.0, (double)Settings->QwenRequestTimeoutSeconds) : 180.0;
+    FString HealthRespLine;
+    if (!SendQwenWorkerRequest(HealthLine, HealthRespLine, OutErr, Timeout))
+    {
+        ShutdownQwenWorker();
+        return false;
+    }
+
+    TSharedPtr<FJsonObject> HealthResp;
+    if (!LocalTalkerParseJsonLine(HealthRespLine, HealthResp) || !HealthResp.IsValid())
+    {
+        OutErr = FString::Printf(TEXT("Invalid health response from Qwen worker: %s"), *HealthRespLine);
+        ShutdownQwenWorker();
+        return false;
+    }
+
+    bool bOk = false;
+    if (!HealthResp->TryGetBoolField(TEXT("ok"), bOk) || !bOk)
+    {
+        FString WorkerErr;
+        HealthResp->TryGetStringField(TEXT("error"), WorkerErr);
+        OutErr = FString::Printf(TEXT("Qwen worker health check failed: %s"), *WorkerErr);
+        ShutdownQwenWorker();
+        return false;
+    }
+
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen worker ready."), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved());
+    return true;
+}
+
+bool ULocalCharacterComponent::SendQwenWorkerRequest(const FString& RequestLine, FString& OutResponseLine, FString& OutErr, double TimeoutSeconds)
+{
+    OutResponseLine.Reset();
+    OutErr.Reset();
+
+    if (!QwenWorker || !QwenWorker->Handle.IsValid())
+    {
+        OutErr = TEXT("Qwen worker is not running.");
+        return false;
+    }
+    if (!QwenWorker->Pipes.WriteInPipe)
+    {
+        OutErr = TEXT("Qwen worker stdin pipe is unavailable.");
+        return false;
+    }
+
+    if (!FLocalTalkerProcess::WriteStdin(QwenWorker->Pipes, RequestLine))
+    {
+        OutErr = TEXT("Failed writing request to Qwen worker stdin.");
+        return false;
+    }
+
+    const double Start = FPlatformTime::Seconds();
+    const double Timeout = FMath::Max(1.0, TimeoutSeconds);
+
+    while (true)
+    {
+        const FString OutChunk = FLocalTalkerProcess::ReadAvailable(QwenWorker->Pipes.ReadPipe);
+        if (!OutChunk.IsEmpty())
+        {
+            QwenWorker->StdoutBuffer += OutChunk;
+
+            FString Line;
+            while (LocalTalkerTryPopLine(QwenWorker->StdoutBuffer, Line))
+            {
+                if (Line.IsEmpty())
+                {
+                    continue;
+                }
+                OutResponseLine = Line;
+                return true;
+            }
+        }
+
+        const FString ErrChunk = FLocalTalkerProcess::ReadAvailable(QwenWorker->Pipes.ReadErrPipe);
+        if (!ErrChunk.IsEmpty())
+        {
+            QwenWorker->StderrBuffer += ErrChunk;
+            UE_LOG(LogLocalTalker, Warning, TEXT("%s[%s] Qwen worker stderr: %s"),
+                *LocalTalkerTimePrefix(this),
+                *GetSpeakerNameResolved(),
+                *ErrChunk);
+        }
+
+        if (!FPlatformProcess::IsProcRunning(QwenWorker->Handle))
+        {
+            OutErr = TEXT("Qwen worker exited unexpectedly.");
+            if (!QwenWorker->StderrBuffer.IsEmpty())
+            {
+                OutErr += TEXT(" stderr: ") + QwenWorker->StderrBuffer;
+            }
+            return false;
+        }
+
+        if ((FPlatformTime::Seconds() - Start) >= Timeout)
+        {
+            OutErr = FString::Printf(TEXT("Timed out waiting for Qwen worker response (%.1fs)."), Timeout);
+            if (!QwenWorker->StderrBuffer.IsEmpty())
+            {
+                OutErr += TEXT(" stderr: ") + QwenWorker->StderrBuffer.Right(512);
+            }
+            return false;
+        }
+
+        FPlatformProcess::Sleep(0.005f);
+    }
+}
+
+void ULocalCharacterComponent::ShutdownQwenWorker()
+{
+    if (!QwenWorker)
+    {
+        return;
+    }
+
+    if (QwenWorker->Handle.IsValid())
+    {
+        // Best-effort graceful shutdown.
+        if (QwenWorker->Pipes.WriteInPipe)
+        {
+            FLocalTalkerProcess::WriteStdin(QwenWorker->Pipes, TEXT("{\"cmd\":\"shutdown\"}\n"));
+        }
+
+        const double Start = FPlatformTime::Seconds();
+        while (FPlatformProcess::IsProcRunning(QwenWorker->Handle) && (FPlatformTime::Seconds() - Start) < 1.0)
+        {
+            FLocalTalkerProcess::ReadAvailable(QwenWorker->Pipes.ReadPipe);
+            FLocalTalkerProcess::ReadAvailable(QwenWorker->Pipes.ReadErrPipe);
+            FPlatformProcess::Sleep(0.01f);
+        }
+
+        if (FPlatformProcess::IsProcRunning(QwenWorker->Handle))
+        {
+            FPlatformProcess::TerminateProc(QwenWorker->Handle, true);
+        }
+        FPlatformProcess::CloseProc(QwenWorker->Handle);
+    }
+
+    FLocalTalkerProcess::ClosePipes(QwenWorker->Pipes);
+    delete QwenWorker;
+    QwenWorker = nullptr;
+}
+
+void ULocalCharacterComponent::RunQwenSentenceToAudio(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, FString& OutErr)
 {
     TArray<uint8> Bytes;
     int32 SampleRate = 0;
     int32 NumChannels = 0;
 
-    if (!GeneratePiperAudioBytes(Sentence, Paths, Bytes, SampleRate, NumChannels, OutErr))
+    if (!GenerateQwenAudioBytes(Sentence, Paths, Bytes, SampleRate, NumChannels, OutErr))
     {
         return;
     }
@@ -1871,7 +2269,7 @@ void ULocalCharacterComponent::RunPiperSentenceToAudio(const FString& Sentence, 
         TryStartPendingAudio();
     });
 
-    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Piper ok: %d bytes, %d ch, %d Hz (ready)"),
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen TTS ok: %d bytes, %d ch, %d Hz (ready)"),
         *LocalTalkerTimePrefix(this),
         *GetSpeakerNameResolved(),
         QueuedBytes,
@@ -1880,82 +2278,120 @@ void ULocalCharacterComponent::RunPiperSentenceToAudio(const FString& Sentence, 
     );
 }
 
-bool ULocalCharacterComponent::GeneratePiperAudioBytes(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, TArray<uint8>& OutBytes, int32& OutSampleRate, int32& OutNumChannels, FString& OutErr)
+bool ULocalCharacterComponent::GenerateQwenAudioBytes(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, TArray<uint8>& OutBytes, int32& OutSampleRate, int32& OutNumChannels, FString& OutErr)
 {
-    const FString VoicePath = ResolveVoiceOnnxPath();
-    if (Paths.PiperExePath.IsEmpty() || VoicePath.IsEmpty())
+    const ULocalTalkerSettings* Settings = GetDefault<ULocalTalkerSettings>();
+    if (Settings && Settings->TtsBackend == ELocalTalkTtsBackend::PiperLegacy)
     {
-        OutErr = TEXT("Piper paths not set. Configure Project Settings -> LocalTalker (PiperExePath + Voices).");
+        OutErr = TEXT("Piper backend is deprecated in this build. Set TTS backend to Qwen3-TTS Worker in Project Settings -> LocalTalker.");
         return false;
     }
 
-    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Piper start: %s"), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved(), *Sentence);
+    if (Sentence.IsEmpty())
+    {
+        OutErr = TEXT("Cannot synthesize empty sentence.");
+        return false;
+    }
+
+    if (!EnsureQwenWorker(Paths, OutErr))
+    {
+        return false;
+    }
+
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen TTS start: %s"), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved(), *Sentence);
 
     const FString TempDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("LocalTalker"));
     IPlatformFile& PF = FPlatformFileManager::Get().GetPlatformFile();
     PF.CreateDirectoryTree(*TempDir);
 
-    const FString OutWav = FPaths::Combine(TempDir, FString::Printf(TEXT("tts_%llu.wav"), (uint64)FPlatformTime::Cycles64()));
+    const FString OutWav = FPaths::Combine(TempDir, FString::Printf(TEXT("qwen_tts_%llu.wav"), (uint64)FPlatformTime::Cycles64()));
+    FString Speaker;
+    FString VoicePromptPath;
+    FString VoiceInstruction;
+    ResolveQwenVoiceSelection(Speaker, VoicePromptPath, VoiceInstruction);
 
-    FString Args;
-    Args += TEXT("-m ") + QuoteArg3(VoicePath) + TEXT(" ");
-    Args += TEXT("-f ") + QuoteArg3(OutWav) + TEXT(" ");
-
-    FProcHandle Handle;
-    FLocalProcPipes Pipes;
-    FString SpawnError;
-
-    if (!FLocalTalkerProcess::SpawnWithPipes(Paths.PiperExePath, Args, Paths.WorkingDir, Handle, Pipes, SpawnError))
+    if (FPaths::IsRelative(VoicePromptPath) && !VoicePromptPath.IsEmpty())
     {
-        OutErr = SpawnError;
-        UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] Piper spawn failed: %s"), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved(), *OutErr);
+        VoicePromptPath = FPaths::ConvertRelativePathToFull(VoicePromptPath);
+    }
+
+    TSharedRef<FJsonObject> Req = MakeShared<FJsonObject>();
+    Req->SetStringField(TEXT("cmd"), TEXT("synthesize"));
+    Req->SetStringField(TEXT("text"), Sentence);
+    Req->SetStringField(TEXT("language"), Paths.QwenLanguage.IsEmpty() ? TEXT("Auto") : Paths.QwenLanguage);
+    Req->SetStringField(TEXT("output_wav"), OutWav);
+    Req->SetBoolField(TEXT("non_streaming_mode"), true);
+    if (!Speaker.IsEmpty())
+    {
+        Req->SetStringField(TEXT("speaker"), Speaker);
+    }
+    if (!VoiceInstruction.IsEmpty())
+    {
+        Req->SetStringField(TEXT("instruct"), VoiceInstruction);
+    }
+    if (!VoicePromptPath.IsEmpty())
+    {
+        Req->SetStringField(TEXT("voice_prompt_path"), VoicePromptPath);
+    }
+
+    FString ReqLine;
+    if (!LocalTalkerSerializeJsonLine(Req, ReqLine))
+    {
+        OutErr = TEXT("Failed to serialize Qwen synthesis request.");
         return false;
     }
 
-    FLocalTalkerProcess::WriteStdin(Pipes, Sentence + TEXT("\n"));
-    if (Pipes.WriteInPipe)
+    const double Timeout = Settings ? FMath::Max(1.0, (double)Settings->QwenRequestTimeoutSeconds) : 180.0;
+    FString RespLine;
+    if (!SendQwenWorkerRequest(ReqLine, RespLine, OutErr, Timeout))
     {
-        FPlatformProcess::ClosePipe(nullptr, Pipes.WriteInPipe);
-        Pipes.WriteInPipe = nullptr;
+        return false;
     }
 
-    FString StdErrAll;
-    auto OnErr = [&](const FString& Chunk) { StdErrAll += Chunk; };
-    auto OnOut = [&](const FString&) {};
-
-    FLocalTalkerProcess::PumpOutputUntilExit(Handle, Pipes, OnOut, OnErr, 0.005);
-
-    int32 ReturnCode = 0;
-    FPlatformProcess::GetProcReturnCode(Handle, &ReturnCode);
-    FPlatformProcess::CloseProc(Handle);
-    FLocalTalkerProcess::ClosePipes(Pipes);
-
-    if (ReturnCode != 0)
+    TSharedPtr<FJsonObject> Resp;
+    if (!LocalTalkerParseJsonLine(RespLine, Resp) || !Resp.IsValid())
     {
-        OutErr = FString::Printf(TEXT("piper failed (code %d). stderr:\n%s"), ReturnCode, *StdErrAll);
-        UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] %s"), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved(), *OutErr);
+        OutErr = FString::Printf(TEXT("Invalid Qwen synthesis response: %s"), *RespLine);
+        return false;
+    }
+
+    bool bOk = false;
+    Resp->TryGetBoolField(TEXT("ok"), bOk);
+    if (!bOk)
+    {
+        FString WorkerErr;
+        Resp->TryGetStringField(TEXT("error"), WorkerErr);
+        OutErr = FString::Printf(TEXT("Qwen synthesis failed: %s"), *WorkerErr);
+        return false;
+    }
+
+    FString WavPath = OutWav;
+    Resp->TryGetStringField(TEXT("wav_path"), WavPath);
+    if (WavPath.IsEmpty())
+    {
+        OutErr = TEXT("Qwen worker returned no wav_path.");
         return false;
     }
 
     FLocalWavPcm16 W;
     FString WavErr;
-    if (!FLocalTalkerWav::LoadWavPcm16(OutWav, W, WavErr))
+    if (!FLocalTalkerWav::LoadWavPcm16(WavPath, W, WavErr))
     {
         OutErr = WavErr;
-        UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] WAV load failed: %s"), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved(), *OutErr);
+        UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] Qwen WAV load failed: %s"), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved(), *OutErr);
         return false;
     }
 
     if (W.Samples.Num() == 0)
     {
-        OutErr = TEXT("Piper produced an empty WAV.");
+        OutErr = TEXT("Qwen worker produced an empty WAV.");
         return false;
     }
 
     // Clean up the temp file ASAP; we have the audio in memory now.
-    PF.DeleteFile(*OutWav);
+    PF.DeleteFile(*WavPath);
 
-    // Piper voices are typically mono, but handle basic stereo->mono downmix if needed.
+    // Qwen output should be mono, but handle stereo->mono defensively.
     int32 NumChannels = FMath::Max(1, W.NumChannels);
     const int32 SampleRate = FMath::Max(1, W.SampleRate);
 

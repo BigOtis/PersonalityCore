@@ -1,6 +1,6 @@
-# LocalTalker In-Process Install Guide (Win64)
+# LocalTalker In-Process Install Guide (Win64, Qwen3-TTS)
 
-This guide is for projects using the in-process llama.cpp backend (`libllama.dll`) with Piper TTS.
+This guide is for projects using in-process llama.cpp plus Qwen3-TTS worker synthesis.
 
 ## 1) Add plugin
 
@@ -16,37 +16,36 @@ Minimum required runtime files:
 - `Plugins/LocalTalker/ThirdParty/llama/Win64/Release/ggml.dll`
 - `Plugins/LocalTalker/ThirdParty/llama/Win64/Release/ggml-base.dll`
 - `Plugins/LocalTalker/ThirdParty/llama/Win64/Release/ggml-cpu.dll`
-- `Plugins/LocalTalker/ThirdParty/piper/Win64/Release/piper.exe`
 - A `.gguf` model in `Plugins/LocalTalker/Resources/Models/`
-- A voice `.onnx` in `Plugins/LocalTalker/Resources/Voices/`
+- `Plugins/LocalTalker/Resources/Qwen/qwen_tts_worker.py`
 
-Optional GPU backends:
+## 3) Prepare Python runtime for Qwen TTS
 
-- Vulkan: `ggml-vulkan.dll`
-- CUDA: `ggml-cuda.dll`
-
-If assets are missing, run:
+Install dependencies in the Python environment you want Unreal to use:
 
 ```powershell
-.\Tools\PrepareLocalTalkerBundle.ps1
+pip install -r Plugins/LocalTalker/Resources/Qwen/requirements-qwen-tts.txt
 ```
 
-## 3) Configure Project Settings
+## 4) Configure Project Settings
 
 Open `Edit -> Project Settings -> LocalTalker`.
 
-- Set `DefaultPaths` if your binaries/models are in custom locations.
-- Set `BundledModelFile` to a model in `Resources/Models`.
-- Configure `DefaultCharacterConfig` for generation behavior.
-- Configure conversation gating/keep-alive under `Conversation`.
+- Set `TTS.Backend` to `Qwen3-TTS Worker`.
+- Set `DefaultPaths.QwenPythonExePath` (if needed).
+- Set `DefaultPaths.QwenModelPath` (repo id or local model dir).
+- Set `DefaultPaths.QwenTokenizerPath` (repo id or local tokenizer dir).
+- Optionally tune `DefaultPaths.QwenDevice` and `DefaultPaths.QwenDType`.
+- Add voice entries under `Voices` (`QwenSpeaker` and/or `QwenVoicePromptPath`).
+- Runtime supports `custom_voice` and `base` Qwen model modes; `voice_design` mode is intentionally unsupported.
 
-## 4) Hook up gameplay
+## 5) Hook up gameplay
 
 - Add `LocalCharacterComponent` to NPC actors.
 - Add `LocalPlayerInteractionComponent` to player actor.
 - Trigger `SpeakToNearestAI("Hello")` or call `SendPromptAndSpeakStreamingInProc(...)` directly on NPCs.
 
-## 5) Run tests
+## 6) Run tests
 
 Editor-cmd automation:
 
@@ -65,21 +64,16 @@ Packaged plugin test runner:
   -TestFilter "Plugins.LocalTalker.Dialog.E2E"
 ```
 
-Local dependency smoke test:
-
-```powershell
-.\Tools\TestLocalTalker.ps1
-```
-
 ## Troubleshooting
 
-- `Failed to load libllama.dll`:
-  - Check `DefaultPaths.LlamaLibPath`
-  - Ensure all required `ggml*.dll` dependencies are present
+- `Qwen worker script not found`:
+  - Check `DefaultPaths.QwenWorkerScriptPath`
+- `Failed to start Qwen worker`:
+  - Check `QwenPythonExePath`
+  - Ensure Python env has Qwen dependencies installed
+- `Qwen synthesis failed`:
+  - Verify `QwenSpeaker` is valid for model
+  - For Base model, ensure `QwenVoicePromptPath` points to an externally generated prompt asset
 - `Failed to load model`:
   - Check `DefaultPaths.LlamaModelPath` or `BundledModelFile`
-  - Ensure the `.gguf` is complete and valid
-- `piper failed`:
-  - Check `piper.exe` and voice `.onnx` paths
-- No AI reply:
-  - Verify listener gating settings and actor proximity
+  - Ensure `.gguf` file is complete and valid

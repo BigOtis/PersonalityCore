@@ -236,7 +236,7 @@ namespace
 		TEXT("  LocalTalker.ITestLLM milo=<prompt> otis=<prompt> timeout=<seconds>\n")
 		TEXT("Notes:\n")
 		TEXT("- Requires Project Settings -> LocalTalker DefaultPaths LlamaLibPath + LlamaModelPath to be set.\n")
-		TEXT("- Piper paths are auto-filled from plugin bundle if not set."),
+		TEXT("- Qwen worker/model paths can be set in Project Settings -> LocalTalker -> DefaultPaths."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&LocalTalker_RunITestLLM)
 	);
 }

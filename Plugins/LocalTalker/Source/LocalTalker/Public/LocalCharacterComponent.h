@@ -14,6 +14,7 @@
 
 class ULocalTalkerInProcGenerateAsync;
 class FLocalTalkerTTSWorker;
+struct FLocalQwenWorkerState;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FLocalCharacterSpokenEvent, const FString&, Text);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FLocalCharacterErrorEvent, const FString&, Error);
@@ -31,6 +32,7 @@ class LOCALTALKER_API ULocalCharacterComponent : public UActorComponent
 
 public:
     ULocalCharacterComponent();
+    virtual ~ULocalCharacterComponent() override;
 
     // --- Configuration ---
     UPROPERTY(EditAnywhere, Category="LocalTalker")
@@ -244,7 +246,7 @@ private:
     bool bNotifiedSubsystemFinished = false;
     FThreadSafeBool bAudioPlaybackComplete = true;
 
-    // When showing real UE subtitles from Piper audio, this is the priority passed to SubtitleManager.
+    // Priority passed to SubtitleManager when using generated speech audio.
     float UESubtitlePriority = 1000.0f;
 
     // When printing debug subtitles on screen.
@@ -269,7 +271,7 @@ private:
     FString BuildPromptWithHistory(const FLocalTalkerCharacterConfig& Config, const FString& UserText) const;
     void EmitSubtitle(const FString& Text, float DurationSeconds);
     void DebugPrintLine(const FString& Line, float Seconds, bool bNewLine) const;
-    FString ResolveVoiceOnnxPath() const;
+    bool ResolveQwenVoiceSelection(FString& OutSpeaker, FString& OutVoicePromptPath, FString& OutInstruction) const;
     bool ShouldAllowTalk() const;
     UFUNCTION()
     void HandleAudioFinished();
@@ -279,8 +281,13 @@ private:
     UFUNCTION() void HandleLLMDelta(const FString& Text);
     UFUNCTION() void HandleLLMCompleted(const FString& Text);
 
-    void RunPiperSentenceToAudio(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, FString& OutErr);
-    bool GeneratePiperAudioBytes(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, TArray<uint8>& OutBytes, int32& OutSampleRate, int32& OutNumChannels, FString& OutErr);
+    void RunQwenSentenceToAudio(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, FString& OutErr);
+    bool GenerateQwenAudioBytes(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, TArray<uint8>& OutBytes, int32& OutSampleRate, int32& OutNumChannels, FString& OutErr);
+    bool EnsureQwenWorker(const FLocalTalkerRuntimePaths& Paths, FString& OutErr);
+    bool SendQwenWorkerRequest(const FString& RequestLine, FString& OutResponseLine, FString& OutErr, double TimeoutSeconds);
+    void ShutdownQwenWorker();
+
+    FLocalQwenWorkerState* QwenWorker = nullptr;
     FLocalTalkerRuntimePaths ResolvePaths() const;
     FLocalTalkerCharacterConfig ResolveConfig() const;
 };
