@@ -417,6 +417,7 @@ public:
     {
         // Ensure we release llama.cpp resources on shutdown (editor/game exit).
         FLocalTalkerLlamaCache::Get().Shutdown();
+        ULocalCharacterComponent::ShutdownSharedQwenWorkerGlobal();
 
 		// Ensure runner is cleaned up if hot-reloading/module shutdown occurs.
 		if (GLLMRunner.IsValid())

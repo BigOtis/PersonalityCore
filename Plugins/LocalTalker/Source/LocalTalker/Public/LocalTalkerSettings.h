@@ -38,6 +38,15 @@ public:
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Qwen", meta=(ClampMin="1.0"))
     float QwenRequestTimeoutSeconds = 180.0f;
 
+    // Cap for Qwen decoder steps per synthesis request. Lower values usually reduce latency.
+    // Set to 0 to use model defaults.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Qwen", meta=(ClampMin="0"))
+    int32 QwenMaxNewTokens = 1536;
+
+    // Use sampling for Qwen synthesis. Disabling sampling is typically faster and more deterministic.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Qwen")
+    bool bQwenDoSample = false;
+
     // Bundled/local voice options (used to populate component dropdown).
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Voices")
     TArray<FLocalTalkVoiceOption> Voices;

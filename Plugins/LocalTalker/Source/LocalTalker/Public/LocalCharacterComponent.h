@@ -33,6 +33,7 @@ class LOCALTALKER_API ULocalCharacterComponent : public UActorComponent
 public:
     ULocalCharacterComponent();
     virtual ~ULocalCharacterComponent() override;
+    static void ShutdownSharedQwenWorkerGlobal();
 
     // --- Configuration ---
     UPROPERTY(EditAnywhere, Category="LocalTalker")
@@ -286,6 +287,7 @@ private:
     bool EnsureQwenWorker(const FLocalTalkerRuntimePaths& Paths, FString& OutErr);
     bool SendQwenWorkerRequest(const FString& RequestLine, FString& OutResponseLine, FString& OutErr, double TimeoutSeconds);
     void ShutdownQwenWorker();
+    void KickoffQwenPrewarmIfNeeded(const FLocalTalkerRuntimePaths& Paths);
 
     FLocalQwenWorkerState* QwenWorker = nullptr;
     FLocalTalkerRuntimePaths ResolvePaths() const;

@@ -14,6 +14,8 @@
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
 #include "Misc/PathViews.h"
+#include "Misc/ScopeLock.h"
+#include "HAL/FileManager.h"
 #include "HAL/PlatformFileManager.h"
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
@@ -74,6 +76,385 @@ struct FLocalQwenWorkerState
     FString StdoutBuffer;
     FString StderrBuffer;
 };
+
+struct FLocalTalkerSharedQwenWorkerState
+{
+    FLocalQwenWorkerState Worker;
+    FString WorkerKey;
+};
+
+static bool LocalTalkerTryPopLine(FString& InOutBuffer, FString& OutLine);
+static bool LocalTalkerParseJsonLine(const FString& Line, TSharedPtr<FJsonObject>& OutObj);
+
+static TUniquePtr<FLocalTalkerSharedQwenWorkerState> GLocalTalkerSharedQwenWorker;
+static FCriticalSection GLocalTalkerSharedQwenWorkerMutex;
+static bool GLocalTalkerQwenPrewarmStarted = false;
+
+static void LocalTalkerShutdownWorkerStateNoLock(FLocalQwenWorkerState& Worker)
+{
+    if (Worker.Handle.IsValid())
+    {
+        if (Worker.Pipes.WriteInPipe)
+        {
+            FLocalTalkerProcess::WriteStdin(Worker.Pipes, TEXT("{\"cmd\":\"shutdown\"}\n"));
+        }
+
+        const double Start = FPlatformTime::Seconds();
+        while (FPlatformProcess::IsProcRunning(Worker.Handle) && (FPlatformTime::Seconds() - Start) < 1.0)
+        {
+            FLocalTalkerProcess::ReadAvailable(Worker.Pipes.ReadPipe);
+            FLocalTalkerProcess::ReadAvailable(Worker.Pipes.ReadErrPipe);
+            FPlatformProcess::Sleep(0.01f);
+        }
+
+        if (FPlatformProcess::IsProcRunning(Worker.Handle))
+        {
+            FPlatformProcess::TerminateProc(Worker.Handle, true);
+        }
+        FPlatformProcess::CloseProc(Worker.Handle);
+    }
+
+    FLocalTalkerProcess::ClosePipes(Worker.Pipes);
+    Worker.StdoutBuffer.Reset();
+    Worker.StderrBuffer.Reset();
+}
+
+static void LocalTalkerShutdownSharedQwenWorkerNoLock()
+{
+    if (!GLocalTalkerSharedQwenWorker.IsValid())
+    {
+        return;
+    }
+
+    LocalTalkerShutdownWorkerStateNoLock(GLocalTalkerSharedQwenWorker->Worker);
+    GLocalTalkerSharedQwenWorker.Reset();
+    GLocalTalkerQwenPrewarmStarted = false;
+}
+
+static FString LocalTalkerBuildQwenWorkerKey(
+    const FString& PythonExe,
+    const FString& WorkerScriptPath,
+    const FString& ModelPath,
+    const FString& TokenizerPath,
+    const FString& Device,
+    const FString& DType,
+    const FString& WorkingDir,
+    bool bUseFlashAttn)
+{
+    return FString::Printf(TEXT("%s|%s|%s|%s|%s|%s|%s|flash=%d"),
+        *PythonExe,
+        *WorkerScriptPath,
+        *ModelPath,
+        *TokenizerPath,
+        *Device,
+        *DType,
+        *WorkingDir,
+        bUseFlashAttn ? 1 : 0);
+}
+
+static bool LocalTalkerLooksLikeRepoId(const FString& InPath)
+{
+    if (InPath.IsEmpty())
+    {
+        return false;
+    }
+    if (InPath.Contains(TEXT("://")))
+    {
+        return false;
+    }
+    if (FPaths::FileExists(InPath) || FPaths::DirectoryExists(InPath))
+    {
+        return false;
+    }
+
+    FString Norm = InPath;
+    Norm.ReplaceInline(TEXT("\\"), TEXT("/"));
+    if (!Norm.Contains(TEXT("/")))
+    {
+        return false;
+    }
+    if (Norm.StartsWith(TEXT("./")) || Norm.StartsWith(TEXT("../")))
+    {
+        return false;
+    }
+    return true;
+}
+
+static void LocalTalkerAddUniqueNonEmpty(TArray<FString>& Paths, const FString& Path)
+{
+    if (!Path.IsEmpty())
+    {
+        Paths.AddUnique(Path);
+    }
+}
+
+static bool LocalTalkerTryResolveHuggingFaceSnapshot(const FString& RepoId, FString& OutSnapshotDir)
+{
+    OutSnapshotDir.Reset();
+    if (!LocalTalkerLooksLikeRepoId(RepoId))
+    {
+        return false;
+    }
+
+    FString RepoEscaped = RepoId;
+    RepoEscaped.ReplaceInline(TEXT("\\"), TEXT("/"));
+    RepoEscaped.ReplaceInline(TEXT("/"), TEXT("--"));
+
+    TArray<FString> HubRoots;
+    LocalTalkerAddUniqueNonEmpty(HubRoots, FPlatformMisc::GetEnvironmentVariable(TEXT("HUGGINGFACE_HUB_CACHE")));
+
+    const FString HFHome = FPlatformMisc::GetEnvironmentVariable(TEXT("HF_HOME"));
+    if (!HFHome.IsEmpty())
+    {
+        LocalTalkerAddUniqueNonEmpty(HubRoots, FPaths::Combine(HFHome, TEXT("hub")));
+    }
+
+    const FString UserProfile = FPlatformMisc::GetEnvironmentVariable(TEXT("USERPROFILE"));
+    if (!UserProfile.IsEmpty())
+    {
+        LocalTalkerAddUniqueNonEmpty(HubRoots, FPaths::Combine(UserProfile, TEXT(".cache/huggingface/hub")));
+    }
+
+    const FString LocalAppData = FPlatformMisc::GetEnvironmentVariable(TEXT("LOCALAPPDATA"));
+    if (!LocalAppData.IsEmpty())
+    {
+        LocalTalkerAddUniqueNonEmpty(HubRoots, FPaths::Combine(LocalAppData, TEXT("huggingface/hub")));
+    }
+
+    IFileManager& FileManager = IFileManager::Get();
+    for (const FString& HubRoot : HubRoots)
+    {
+        const FString SnapshotsDir = FPaths::Combine(HubRoot, FString::Printf(TEXT("models--%s"), *RepoEscaped), TEXT("snapshots"));
+        if (!FileManager.DirectoryExists(*SnapshotsDir))
+        {
+            continue;
+        }
+
+        TArray<FString> SnapshotFolders;
+        FileManager.FindFiles(SnapshotFolders, *FPaths::Combine(SnapshotsDir, TEXT("*")), false, true);
+        if (SnapshotFolders.Num() == 0)
+        {
+            continue;
+        }
+
+        FDateTime BestTimestamp = FDateTime::MinValue();
+        FString BestPath;
+        for (const FString& FolderName : SnapshotFolders)
+        {
+            const FString Candidate = FPaths::Combine(SnapshotsDir, FolderName);
+            const FDateTime Timestamp = FileManager.GetTimeStamp(*Candidate);
+            if (BestPath.IsEmpty() || Timestamp > BestTimestamp)
+            {
+                BestPath = Candidate;
+                BestTimestamp = Timestamp;
+            }
+        }
+
+        if (!BestPath.IsEmpty() && FileManager.DirectoryExists(*BestPath))
+        {
+            OutSnapshotDir = BestPath;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static FString LocalTalkerResolveQwenAssetPath(const FString& InPath, const FString& PluginBaseDir, bool& bOutResolvedViaSnapshot)
+{
+    bOutResolvedViaSnapshot = false;
+
+    FString Path = InPath;
+    if (Path.IsEmpty())
+    {
+        return Path;
+    }
+
+    if (FPaths::FileExists(Path) || FPaths::DirectoryExists(Path))
+    {
+        return Path;
+    }
+
+    if (FPaths::IsRelative(Path))
+    {
+        if (!PluginBaseDir.IsEmpty())
+        {
+            const FString PluginCandidate = FPaths::Combine(PluginBaseDir, Path);
+            if (FPaths::FileExists(PluginCandidate) || FPaths::DirectoryExists(PluginCandidate))
+            {
+                return PluginCandidate;
+            }
+        }
+
+        const FString FullCandidate = FPaths::ConvertRelativePathToFull(Path);
+        if (FPaths::FileExists(FullCandidate) || FPaths::DirectoryExists(FullCandidate))
+        {
+            return FullCandidate;
+        }
+    }
+
+    FString SnapshotPath;
+    if (LocalTalkerTryResolveHuggingFaceSnapshot(Path, SnapshotPath))
+    {
+        bOutResolvedViaSnapshot = true;
+        return SnapshotPath;
+    }
+
+    return Path;
+}
+
+static bool LocalTalkerSendQwenWorkerRequestNoLock(
+    ULocalCharacterComponent* Owner,
+    FLocalQwenWorkerState& WorkerState,
+    const FString& RequestLine,
+    FString& OutResponseLine,
+    FString& OutErr,
+    double TimeoutSeconds,
+    const FThreadSafeBool* StopFlag,
+    const FThreadSafeBool* InterruptedFlag)
+{
+    OutResponseLine.Reset();
+    OutErr.Reset();
+    FString IgnoredStdoutTail;
+
+    const FString TimePrefix = LocalTalkerTimePrefix(Owner);
+    const FString Speaker = Owner ? Owner->GetSpeakerNameResolved() : FString(TEXT("SharedQwen"));
+
+    if (LocalTalkerShouldLogAudioTrace())
+    {
+        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen request -> %s"),
+            *TimePrefix,
+            *Speaker,
+            *LocalTalkerPreview(RequestLine, 160));
+    }
+
+    if (!WorkerState.Handle.IsValid())
+    {
+        OutErr = TEXT("Qwen worker is not running.");
+        return false;
+    }
+    if (!WorkerState.Pipes.WriteInPipe)
+    {
+        OutErr = TEXT("Qwen worker stdin pipe is unavailable.");
+        return false;
+    }
+
+    if (!FLocalTalkerProcess::WriteStdin(WorkerState.Pipes, RequestLine))
+    {
+        OutErr = TEXT("Failed writing request to Qwen worker stdin.");
+        return false;
+    }
+
+    const double Start = FPlatformTime::Seconds();
+    const double Timeout = FMath::Max(1.0, TimeoutSeconds);
+
+    while (true)
+    {
+        if ((StopFlag && !!(*StopFlag)) || (InterruptedFlag && !!(*InterruptedFlag)))
+        {
+            OutErr = TEXT("Qwen request canceled (TTS stop/interrupted).");
+            return false;
+        }
+
+        const FString OutChunk = FLocalTalkerProcess::ReadAvailable(WorkerState.Pipes.ReadPipe);
+        if (!OutChunk.IsEmpty())
+        {
+            WorkerState.StdoutBuffer += OutChunk;
+
+            FString Line;
+            while (LocalTalkerTryPopLine(WorkerState.StdoutBuffer, Line))
+            {
+                if (Line.IsEmpty())
+                {
+                    continue;
+                }
+
+                TSharedPtr<FJsonObject> Parsed;
+                if (!LocalTalkerParseJsonLine(Line, Parsed) || !Parsed.IsValid())
+                {
+                    FString Snippet = Line;
+                    Snippet.ReplaceInline(TEXT("\n"), TEXT(" "));
+                    Snippet.ReplaceInline(TEXT("\r"), TEXT(" "));
+                    Snippet.TrimStartAndEndInline();
+                    if (Snippet.Len() > 200)
+                    {
+                        Snippet = Snippet.Left(200) + TEXT("...");
+                    }
+
+                    UE_LOG(LogLocalTalker, Verbose, TEXT("%s[%s] Qwen worker stdout (ignored non-JSON): %s"),
+                        *TimePrefix,
+                        *Speaker,
+                        *Snippet);
+
+                    if (!Snippet.IsEmpty())
+                    {
+                        if (!IgnoredStdoutTail.IsEmpty())
+                        {
+                            IgnoredStdoutTail += TEXT(" | ");
+                        }
+                        IgnoredStdoutTail += Snippet;
+                        constexpr int32 MaxTailChars = 512;
+                        if (IgnoredStdoutTail.Len() > MaxTailChars)
+                        {
+                            IgnoredStdoutTail = IgnoredStdoutTail.Right(MaxTailChars);
+                        }
+                    }
+                    continue;
+                }
+
+                OutResponseLine = Line;
+                if (LocalTalkerShouldLogAudioTrace())
+                {
+                    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen response <- %s"),
+                        *TimePrefix,
+                        *Speaker,
+                        *LocalTalkerPreview(OutResponseLine, 200));
+                }
+                return true;
+            }
+        }
+
+        const FString ErrChunk = FLocalTalkerProcess::ReadAvailable(WorkerState.Pipes.ReadErrPipe);
+        if (!ErrChunk.IsEmpty())
+        {
+            WorkerState.StderrBuffer += ErrChunk;
+            UE_LOG(LogLocalTalker, Warning, TEXT("%s[%s] Qwen worker stderr: %s"),
+                *TimePrefix,
+                *Speaker,
+                *ErrChunk);
+        }
+
+        if (!FPlatformProcess::IsProcRunning(WorkerState.Handle))
+        {
+            OutErr = TEXT("Qwen worker exited unexpectedly.");
+            if (!IgnoredStdoutTail.IsEmpty())
+            {
+                OutErr += TEXT(" stdout: ") + IgnoredStdoutTail;
+            }
+            if (!WorkerState.StderrBuffer.IsEmpty())
+            {
+                OutErr += TEXT(" stderr: ") + WorkerState.StderrBuffer;
+            }
+            return false;
+        }
+
+        if ((FPlatformTime::Seconds() - Start) >= Timeout)
+        {
+            OutErr = FString::Printf(TEXT("Timed out waiting for Qwen worker response (%.1fs)."), Timeout);
+            if (!IgnoredStdoutTail.IsEmpty())
+            {
+                OutErr += TEXT(" stdout: ") + IgnoredStdoutTail.Right(256);
+            }
+            if (!WorkerState.StderrBuffer.IsEmpty())
+            {
+                OutErr += TEXT(" stderr: ") + WorkerState.StderrBuffer.Right(512);
+            }
+            return false;
+        }
+
+        FPlatformProcess::Sleep(0.005f);
+    }
+}
 
 static bool LocalTalkerTryPopLine(FString& InOutBuffer, FString& OutLine)
 {
@@ -243,6 +624,8 @@ void ULocalCharacterComponent::BeginPlay()
         *GetSpeakerNameResolved(),
         ResolvedMicDevice.IsEmpty() ? TEXT("Default (System)") : *ResolvedMicDevice
     );
+
+    KickoffQwenPrewarmIfNeeded(Paths);
 
 }
 
@@ -2105,35 +2488,16 @@ void ULocalCharacterComponent::StopTTSWorker()
 bool ULocalCharacterComponent::EnsureQwenWorker(const FLocalTalkerRuntimePaths& Paths, FString& OutErr)
 {
     OutErr.Reset();
-
-    if (QwenWorker &&
-        QwenWorker->Handle.IsValid() &&
-        FPlatformProcess::IsProcRunning(QwenWorker->Handle))
-    {
-        return true;
-    }
-
-    ShutdownQwenWorker();
+    const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LocalTalker"));
+    const FString PluginBase = Plugin.IsValid() ? Plugin->GetBaseDir() : FString();
 
     FString WorkerScriptPath = Paths.QwenWorkerScriptPath;
     if (FPaths::IsRelative(WorkerScriptPath))
     {
-        if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LocalTalker")))
-        {
-            const FString Candidate = FPaths::Combine(Plugin->GetBaseDir(), WorkerScriptPath);
-            if (FPaths::FileExists(Candidate))
-            {
-                WorkerScriptPath = Candidate;
-            }
-            else
-            {
-                WorkerScriptPath = FPaths::ConvertRelativePathToFull(WorkerScriptPath);
-            }
-        }
-        else
-        {
-            WorkerScriptPath = FPaths::ConvertRelativePathToFull(WorkerScriptPath);
-        }
+        const FString PluginCandidate = PluginBase.IsEmpty() ? FString() : FPaths::Combine(PluginBase, WorkerScriptPath);
+        WorkerScriptPath = (!PluginCandidate.IsEmpty() && FPaths::FileExists(PluginCandidate))
+            ? PluginCandidate
+            : FPaths::ConvertRelativePathToFull(WorkerScriptPath);
     }
     if (WorkerScriptPath.IsEmpty() || !FPaths::FileExists(WorkerScriptPath))
     {
@@ -2151,38 +2515,47 @@ bool ULocalCharacterComponent::EnsureQwenWorker(const FLocalTalkerRuntimePaths& 
         return false;
     }
 
-    FString ModelPath = Paths.QwenModelPath;
-    if (FPaths::IsRelative(ModelPath))
+    bool bModelFromSnapshot = false;
+    bool bTokenizerFromSnapshot = false;
+    const FString ModelPath = LocalTalkerResolveQwenAssetPath(Paths.QwenModelPath, PluginBase, bModelFromSnapshot);
+    FString TokenizerPath = LocalTalkerResolveQwenAssetPath(Paths.QwenTokenizerPath, PluginBase, bTokenizerFromSnapshot);
+    if (LocalTalkerLooksLikeRepoId(TokenizerPath) && (FPaths::DirectoryExists(ModelPath) || FPaths::FileExists(ModelPath)))
     {
-        if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LocalTalker")))
-        {
-            const FString Candidate = FPaths::Combine(Plugin->GetBaseDir(), ModelPath);
-            if (FPaths::DirectoryExists(Candidate) || FPaths::FileExists(Candidate))
-            {
-                ModelPath = Candidate;
-            }
-        }
-    }
-
-    FString TokenizerPath = Paths.QwenTokenizerPath;
-    if (FPaths::IsRelative(TokenizerPath))
-    {
-        if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("LocalTalker")))
-        {
-            const FString Candidate = FPaths::Combine(Plugin->GetBaseDir(), TokenizerPath);
-            if (FPaths::DirectoryExists(Candidate) || FPaths::FileExists(Candidate))
-            {
-                TokenizerPath = Candidate;
-            }
-        }
+        // Qwen3TTSModel loads processor from the model path; prefer local model snapshot over remote tokenizer repo id.
+        TokenizerPath = ModelPath;
     }
 
     const ULocalTalkerSettings* Settings = GetDefault<ULocalTalkerSettings>();
     const double Timeout = Settings ? FMath::Max(1.0, (double)Settings->QwenRequestTimeoutSeconds) : 180.0;
+    const bool bUseFlashAttn = Settings && Settings->bQwenUseFlashAttention;
+
     auto StartWorkerWithRuntime = [&](const FString& Device, const FString& DType, FString& OutStartErr) -> bool
     {
         OutStartErr.Reset();
-        ShutdownQwenWorker();
+
+        FScopeLock SharedLock(&GLocalTalkerSharedQwenWorkerMutex);
+        const FString WorkerKey = LocalTalkerBuildQwenWorkerKey(
+            Paths.QwenPythonExePath,
+            WorkerScriptPath,
+            ModelPath,
+            TokenizerPath,
+            Device,
+            DType,
+            Paths.WorkingDir,
+            bUseFlashAttn);
+
+        if (GLocalTalkerSharedQwenWorker.IsValid() &&
+            GLocalTalkerSharedQwenWorker->WorkerKey == WorkerKey &&
+            GLocalTalkerSharedQwenWorker->Worker.Handle.IsValid() &&
+            FPlatformProcess::IsProcRunning(GLocalTalkerSharedQwenWorker->Worker.Handle))
+        {
+            QwenWorker = &GLocalTalkerSharedQwenWorker->Worker;
+            return true;
+        }
+
+        LocalTalkerShutdownSharedQwenWorkerNoLock();
+        GLocalTalkerSharedQwenWorker = MakeUnique<FLocalTalkerSharedQwenWorkerState>();
+        GLocalTalkerSharedQwenWorker->WorkerKey = WorkerKey;
 
         FString Args = QuoteArg3(WorkerScriptPath);
         Args += TEXT(" --model ") + QuoteArg3(ModelPath);
@@ -2198,22 +2571,19 @@ bool ULocalCharacterComponent::EnsureQwenWorker(const FLocalTalkerRuntimePaths& 
         {
             Args += TEXT(" --dtype ") + QuoteArg3(DType);
         }
-        if (Settings && Settings->bQwenUseFlashAttention)
-        {
-            Args += TEXT(" --flash-attn");
-        }
-        else
-        {
-            Args += TEXT(" --no-flash-attn");
-        }
-
-        QwenWorker = new FLocalQwenWorkerState();
+        Args += bUseFlashAttn ? TEXT(" --flash-attn") : TEXT(" --no-flash-attn");
 
         FString SpawnErr;
-        if (!FLocalTalkerProcess::SpawnWithPipes(Paths.QwenPythonExePath, Args, Paths.WorkingDir, QwenWorker->Handle, QwenWorker->Pipes, SpawnErr))
+        if (!FLocalTalkerProcess::SpawnWithPipes(
+            Paths.QwenPythonExePath,
+            Args,
+            Paths.WorkingDir,
+            GLocalTalkerSharedQwenWorker->Worker.Handle,
+            GLocalTalkerSharedQwenWorker->Worker.Pipes,
+            SpawnErr))
         {
             OutStartErr = FString::Printf(TEXT("Failed to start Qwen worker: %s"), *SpawnErr);
-            ShutdownQwenWorker();
+            LocalTalkerShutdownSharedQwenWorkerNoLock();
             return false;
         }
 
@@ -2223,14 +2593,22 @@ bool ULocalCharacterComponent::EnsureQwenWorker(const FLocalTalkerRuntimePaths& 
         if (!LocalTalkerSerializeJsonLine(HealthReq, HealthLine))
         {
             OutStartErr = TEXT("Failed to serialize Qwen health request.");
-            ShutdownQwenWorker();
+            LocalTalkerShutdownSharedQwenWorkerNoLock();
             return false;
         }
 
         FString HealthRespLine;
-        if (!SendQwenWorkerRequest(HealthLine, HealthRespLine, OutStartErr, Timeout))
+        if (!LocalTalkerSendQwenWorkerRequestNoLock(
+            this,
+            GLocalTalkerSharedQwenWorker->Worker,
+            HealthLine,
+            HealthRespLine,
+            OutStartErr,
+            Timeout,
+            &bTTSStop,
+            &bInterrupted))
         {
-            ShutdownQwenWorker();
+            LocalTalkerShutdownSharedQwenWorkerNoLock();
             return false;
         }
 
@@ -2238,7 +2616,7 @@ bool ULocalCharacterComponent::EnsureQwenWorker(const FLocalTalkerRuntimePaths& 
         if (!LocalTalkerParseJsonLine(HealthRespLine, HealthResp) || !HealthResp.IsValid())
         {
             OutStartErr = FString::Printf(TEXT("Invalid health response from Qwen worker: %s"), *HealthRespLine);
-            ShutdownQwenWorker();
+            LocalTalkerShutdownSharedQwenWorkerNoLock();
             return false;
         }
 
@@ -2248,11 +2626,22 @@ bool ULocalCharacterComponent::EnsureQwenWorker(const FLocalTalkerRuntimePaths& 
             FString WorkerErr;
             HealthResp->TryGetStringField(TEXT("error"), WorkerErr);
             OutStartErr = FString::Printf(TEXT("Qwen worker health check failed: %s"), *WorkerErr);
-            ShutdownQwenWorker();
+            LocalTalkerShutdownSharedQwenWorkerNoLock();
             return false;
         }
 
-        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen worker ready (device='%s', dtype='%s')."),
+        QwenWorker = &GLocalTalkerSharedQwenWorker->Worker;
+
+        if (bModelFromSnapshot || bTokenizerFromSnapshot)
+        {
+            UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen local snapshot resolved: model='%s' tokenizer='%s'."),
+                *LocalTalkerTimePrefix(this),
+                *GetSpeakerNameResolved(),
+                *ModelPath,
+                *TokenizerPath);
+        }
+
+        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen worker ready (shared=1 device='%s', dtype='%s')."),
             *LocalTalkerTimePrefix(this),
             *GetSpeakerNameResolved(),
             *Device,
@@ -2302,179 +2691,110 @@ bool ULocalCharacterComponent::EnsureQwenWorker(const FLocalTalkerRuntimePaths& 
 
 bool ULocalCharacterComponent::SendQwenWorkerRequest(const FString& RequestLine, FString& OutResponseLine, FString& OutErr, double TimeoutSeconds)
 {
-    OutResponseLine.Reset();
-    OutErr.Reset();
-    FString IgnoredStdoutTail;
+    FScopeLock SharedLock(&GLocalTalkerSharedQwenWorkerMutex);
+    FLocalQwenWorkerState* WorkerState = nullptr;
 
-    if (LocalTalkerShouldLogAudioTrace())
+    if (GLocalTalkerSharedQwenWorker.IsValid() &&
+        GLocalTalkerSharedQwenWorker->Worker.Handle.IsValid() &&
+        FPlatformProcess::IsProcRunning(GLocalTalkerSharedQwenWorker->Worker.Handle))
     {
-        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen request -> %s"),
-            *LocalTalkerTimePrefix(this),
-            *GetSpeakerNameResolved(),
-            *LocalTalkerPreview(RequestLine, 160));
+        WorkerState = &GLocalTalkerSharedQwenWorker->Worker;
+    }
+    else if (QwenWorker &&
+        QwenWorker->Handle.IsValid() &&
+        FPlatformProcess::IsProcRunning(QwenWorker->Handle))
+    {
+        WorkerState = QwenWorker;
     }
 
-    if (!QwenWorker || !QwenWorker->Handle.IsValid())
+    if (!WorkerState)
     {
         OutErr = TEXT("Qwen worker is not running.");
         return false;
     }
-    if (!QwenWorker->Pipes.WriteInPipe)
-    {
-        OutErr = TEXT("Qwen worker stdin pipe is unavailable.");
-        return false;
-    }
 
-    if (!FLocalTalkerProcess::WriteStdin(QwenWorker->Pipes, RequestLine))
-    {
-        OutErr = TEXT("Failed writing request to Qwen worker stdin.");
-        return false;
-    }
-
-    const double Start = FPlatformTime::Seconds();
-    const double Timeout = FMath::Max(1.0, TimeoutSeconds);
-
-    while (true)
-    {
-        if (bTTSStop || bInterrupted)
-        {
-            OutErr = TEXT("Qwen request canceled (TTS stop/interrupted).");
-            return false;
-        }
-
-        const FString OutChunk = FLocalTalkerProcess::ReadAvailable(QwenWorker->Pipes.ReadPipe);
-        if (!OutChunk.IsEmpty())
-        {
-            QwenWorker->StdoutBuffer += OutChunk;
-
-            FString Line;
-            while (LocalTalkerTryPopLine(QwenWorker->StdoutBuffer, Line))
-            {
-                if (Line.IsEmpty())
-                {
-                    continue;
-                }
-
-                TSharedPtr<FJsonObject> Parsed;
-                if (!LocalTalkerParseJsonLine(Line, Parsed) || !Parsed.IsValid())
-                {
-                    FString Snippet = Line;
-                    Snippet.ReplaceInline(TEXT("\n"), TEXT(" "));
-                    Snippet.ReplaceInline(TEXT("\r"), TEXT(" "));
-                    Snippet.TrimStartAndEndInline();
-                    if (Snippet.Len() > 200)
-                    {
-                        Snippet = Snippet.Left(200) + TEXT("...");
-                    }
-
-                    UE_LOG(LogLocalTalker, Verbose, TEXT("%s[%s] Qwen worker stdout (ignored non-JSON): %s"),
-                        *LocalTalkerTimePrefix(this),
-                        *GetSpeakerNameResolved(),
-                        *Snippet);
-
-                    if (!Snippet.IsEmpty())
-                    {
-                        if (!IgnoredStdoutTail.IsEmpty())
-                        {
-                            IgnoredStdoutTail += TEXT(" | ");
-                        }
-                        IgnoredStdoutTail += Snippet;
-                        constexpr int32 MaxTailChars = 512;
-                        if (IgnoredStdoutTail.Len() > MaxTailChars)
-                        {
-                            IgnoredStdoutTail = IgnoredStdoutTail.Right(MaxTailChars);
-                        }
-                    }
-                    continue;
-                }
-
-                OutResponseLine = Line;
-                if (LocalTalkerShouldLogAudioTrace())
-                {
-                    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen response <- %s"),
-                        *LocalTalkerTimePrefix(this),
-                        *GetSpeakerNameResolved(),
-                        *LocalTalkerPreview(OutResponseLine, 200));
-                }
-                return true;
-            }
-        }
-
-        const FString ErrChunk = FLocalTalkerProcess::ReadAvailable(QwenWorker->Pipes.ReadErrPipe);
-        if (!ErrChunk.IsEmpty())
-        {
-            QwenWorker->StderrBuffer += ErrChunk;
-            UE_LOG(LogLocalTalker, Warning, TEXT("%s[%s] Qwen worker stderr: %s"),
-                *LocalTalkerTimePrefix(this),
-                *GetSpeakerNameResolved(),
-                *ErrChunk);
-        }
-
-        if (!FPlatformProcess::IsProcRunning(QwenWorker->Handle))
-        {
-            OutErr = TEXT("Qwen worker exited unexpectedly.");
-            if (!IgnoredStdoutTail.IsEmpty())
-            {
-                OutErr += TEXT(" stdout: ") + IgnoredStdoutTail;
-            }
-            if (!QwenWorker->StderrBuffer.IsEmpty())
-            {
-                OutErr += TEXT(" stderr: ") + QwenWorker->StderrBuffer;
-            }
-            return false;
-        }
-
-        if ((FPlatformTime::Seconds() - Start) >= Timeout)
-        {
-            OutErr = FString::Printf(TEXT("Timed out waiting for Qwen worker response (%.1fs)."), Timeout);
-            if (!IgnoredStdoutTail.IsEmpty())
-            {
-                OutErr += TEXT(" stdout: ") + IgnoredStdoutTail.Right(256);
-            }
-            if (!QwenWorker->StderrBuffer.IsEmpty())
-            {
-                OutErr += TEXT(" stderr: ") + QwenWorker->StderrBuffer.Right(512);
-            }
-            return false;
-        }
-
-        FPlatformProcess::Sleep(0.005f);
-    }
+    return LocalTalkerSendQwenWorkerRequestNoLock(
+        this,
+        *WorkerState,
+        RequestLine,
+        OutResponseLine,
+        OutErr,
+        TimeoutSeconds,
+        &bTTSStop,
+        &bInterrupted);
 }
 
 void ULocalCharacterComponent::ShutdownQwenWorker()
 {
-    if (!QwenWorker)
+    QwenWorker = nullptr;
+}
+
+void ULocalCharacterComponent::ShutdownSharedQwenWorkerGlobal()
+{
+    FScopeLock SharedLock(&GLocalTalkerSharedQwenWorkerMutex);
+    LocalTalkerShutdownSharedQwenWorkerNoLock();
+}
+
+void ULocalCharacterComponent::KickoffQwenPrewarmIfNeeded(const FLocalTalkerRuntimePaths& Paths)
+{
+    bool bShouldStart = false;
+    {
+        FScopeLock SharedLock(&GLocalTalkerSharedQwenWorkerMutex);
+        if (!GLocalTalkerQwenPrewarmStarted)
+        {
+            GLocalTalkerQwenPrewarmStarted = true;
+            bShouldStart = true;
+        }
+    }
+
+    if (!bShouldStart)
     {
         return;
     }
 
-    if (QwenWorker->Handle.IsValid())
+    const TWeakObjectPtr<ULocalCharacterComponent> WeakThis(this);
+    Async(EAsyncExecution::ThreadPool, [WeakThis, Paths]()
     {
-        // Best-effort graceful shutdown.
-        if (QwenWorker->Pipes.WriteInPipe)
+        ULocalCharacterComponent* Owner = WeakThis.Get();
+        if (!Owner)
         {
-            FLocalTalkerProcess::WriteStdin(QwenWorker->Pipes, TEXT("{\"cmd\":\"shutdown\"}\n"));
+            return;
         }
 
-        const double Start = FPlatformTime::Seconds();
-        while (FPlatformProcess::IsProcRunning(QwenWorker->Handle) && (FPlatformTime::Seconds() - Start) < 1.0)
+        FString EnsureErr;
+        if (!Owner->EnsureQwenWorker(Paths, EnsureErr))
         {
-            FLocalTalkerProcess::ReadAvailable(QwenWorker->Pipes.ReadPipe);
-            FLocalTalkerProcess::ReadAvailable(QwenWorker->Pipes.ReadErrPipe);
-            FPlatformProcess::Sleep(0.01f);
+            UE_LOG(LogLocalTalker, Warning, TEXT("%s[%s] Qwen prewarm failed during worker init: %s"),
+                *LocalTalkerTimePrefix(Owner),
+                *Owner->GetSpeakerNameResolved(),
+                *EnsureErr);
+            FScopeLock SharedLock(&GLocalTalkerSharedQwenWorkerMutex);
+            GLocalTalkerQwenPrewarmStarted = false;
+            return;
         }
 
-        if (FPlatformProcess::IsProcRunning(QwenWorker->Handle))
+        TArray<uint8> WarmBytes;
+        int32 WarmRate = 0;
+        int32 WarmChannels = 0;
+        FString WarmErr;
+        if (!Owner->GenerateQwenAudioBytes(TEXT("Ready."), Paths, WarmBytes, WarmRate, WarmChannels, WarmErr))
         {
-            FPlatformProcess::TerminateProc(QwenWorker->Handle, true);
+            UE_LOG(LogLocalTalker, Warning, TEXT("%s[%s] Qwen prewarm synth failed: %s"),
+                *LocalTalkerTimePrefix(Owner),
+                *Owner->GetSpeakerNameResolved(),
+                *WarmErr);
+            FScopeLock SharedLock(&GLocalTalkerSharedQwenWorkerMutex);
+            GLocalTalkerQwenPrewarmStarted = false;
+            return;
         }
-        FPlatformProcess::CloseProc(QwenWorker->Handle);
-    }
 
-    FLocalTalkerProcess::ClosePipes(QwenWorker->Pipes);
-    delete QwenWorker;
-    QwenWorker = nullptr;
+        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen prewarm complete (bytes=%d rate=%d channels=%d)."),
+            *LocalTalkerTimePrefix(Owner),
+            *Owner->GetSpeakerNameResolved(),
+            WarmBytes.Num(),
+            WarmRate,
+            WarmChannels);
+    });
 }
 
 void ULocalCharacterComponent::RunQwenSentenceToAudio(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, FString& OutErr)
@@ -2612,6 +2932,14 @@ bool ULocalCharacterComponent::GenerateQwenAudioBytes(const FString& Sentence, c
     Req->SetStringField(TEXT("language"), Paths.QwenLanguage.IsEmpty() ? TEXT("Auto") : Paths.QwenLanguage);
     Req->SetStringField(TEXT("output_wav"), OutWav);
     Req->SetBoolField(TEXT("non_streaming_mode"), true);
+    if (Settings)
+    {
+        Req->SetBoolField(TEXT("do_sample"), Settings->bQwenDoSample);
+        if (Settings->QwenMaxNewTokens > 0)
+        {
+            Req->SetNumberField(TEXT("max_new_tokens"), Settings->QwenMaxNewTokens);
+        }
+    }
     if (!Speaker.IsEmpty())
     {
         Req->SetStringField(TEXT("speaker"), Speaker);
@@ -2624,6 +2952,14 @@ bool ULocalCharacterComponent::GenerateQwenAudioBytes(const FString& Sentence, c
     {
         Req->SetStringField(TEXT("voice_prompt_path"), VoicePromptPath);
     }
+
+    const int32 RequestMaxNewTokens = Settings ? Settings->QwenMaxNewTokens : 0;
+    const bool bRequestDoSample = Settings ? Settings->bQwenDoSample : false;
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen synth opts: do_sample=%d max_new_tokens=%d"),
+        *LocalTalkerTimePrefix(this),
+        *GetSpeakerNameResolved(),
+        bRequestDoSample ? 1 : 0,
+        RequestMaxNewTokens);
 
     FString ReqLine;
     if (!LocalTalkerSerializeJsonLine(Req, ReqLine))
