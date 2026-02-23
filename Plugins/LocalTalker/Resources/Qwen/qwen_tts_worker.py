@@ -3,6 +3,7 @@ import argparse
 from collections import OrderedDict
 import json
 import os
+import platform
 import sys
 import time
 import wave
@@ -126,12 +127,19 @@ def _write_wav_pcm16_bytes(path: str, pcm_i16_le_bytes: bytes, sample_rate: int,
 
 class Worker:
     def __init__(self, model_path: str, tokenizer_path: str, device: str, dtype: str, use_flash_attn: bool, cache_size: int):
+        self.model_path = model_path
+        self.device_requested = device
+        self.dtype_requested = dtype
+        self.use_flash_attn = bool(use_flash_attn)
+
         resolved_device = device
         resolved_dtype = dtype
         if str(device).strip().lower().startswith("cuda") and not torch.cuda.is_available():
             _log(f"Requested device '{device}' but CUDA is unavailable; falling back to CPU/float32.")
             resolved_device = "cpu"
             resolved_dtype = "float32"
+        self.device_resolved = resolved_device
+        self.dtype_resolved = resolved_dtype
 
         load_kwargs: Dict[str, Any] = {
             "device_map": resolved_device,
@@ -161,6 +169,35 @@ class Worker:
             self.languages = []
 
         _log(f"Model loaded. kind={self.model_kind} speakers={len(self.speakers)} languages={len(self.languages)}")
+
+    def runtime_info(self) -> Dict[str, Any]:
+        cuda_available = bool(torch.cuda.is_available())
+        cuda_device_count = int(torch.cuda.device_count()) if cuda_available else 0
+        cuda_device_name = ""
+        if cuda_available and cuda_device_count > 0:
+            try:
+                cuda_device_name = str(torch.cuda.get_device_name(0))
+            except Exception:
+                cuda_device_name = ""
+
+        return {
+            "pid": int(os.getpid()),
+            "cwd": os.getcwd(),
+            "python_executable": sys.executable,
+            "python_version": platform.python_version(),
+            "torch_version": str(getattr(torch, "__version__", "")),
+            "torch_cuda_version": str(getattr(torch.version, "cuda", "") or ""),
+            "cuda_available": cuda_available,
+            "cuda_device_count": cuda_device_count,
+            "cuda_device_name": cuda_device_name,
+            "model_path": self.model_path,
+            "device_requested": self.device_requested,
+            "device_resolved": self.device_resolved,
+            "dtype_requested": self.dtype_requested,
+            "dtype_resolved": self.dtype_resolved,
+            "flash_attn": self.use_flash_attn,
+            "cache_size": int(self.cache_size),
+        }
 
     def _cache_key(self, req: Dict[str, Any], text: str, language: str, speaker: str, instruct: str, voice_prompt_path: str, non_streaming_mode: bool, gen_kwargs: Dict[str, Any]) -> str:
         key_obj = {
@@ -245,6 +282,7 @@ class Worker:
 
     def synthesize(self, req: Dict[str, Any]) -> Dict[str, Any]:
         t_all0 = time.perf_counter()
+        req_id = str(req.get("request_id", "") or "").strip()
         text = str(req.get("text", "")).strip()
         if not text:
             return {"ok": False, "error": "text is required"}
@@ -280,6 +318,12 @@ class Worker:
             if value is not None:
                 gen_kwargs[key] = value
 
+        _log(
+            f"synthesize.begin req_id={req_id or '-'} chars={len(text)} "
+            f"speaker='{speaker}' language='{language}' non_streaming={1 if non_streaming_mode else 0} "
+            f"gen={gen_kwargs}"
+        )
+
         use_cache = bool(req.get("use_cache", True))
         cache_key = self._cache_key(req, text, language, speaker, instruct, voice_prompt_path, non_streaming_mode, gen_kwargs)
         if use_cache:
@@ -299,6 +343,7 @@ class Worker:
                     "sample_rate": int(cached["sample_rate"]),
                     "num_samples": int(cached["num_samples"]),
                     "metrics": {
+                        "request_id": req_id,
                         "cache_hit": True,
                         "model_seconds": 0.0,
                         "write_seconds": round(t_write1 - t_write0, 6),
@@ -362,6 +407,11 @@ class Worker:
         t_write0 = time.perf_counter()
         _write_wav_pcm16_bytes(output_wav, pcm_bytes, int(sr), int(channels))
         t_write1 = time.perf_counter()
+        t_total = time.perf_counter() - t_all0
+        _log(
+            f"synthesize.done req_id={req_id or '-'} ok=1 chars={len(text)} "
+            f"audio_samples={num_samples} rate={int(sr)} model_s={t_model1 - t_model0:.3f} total_s={t_total:.3f}"
+        )
 
         return {
             "ok": True,
@@ -369,10 +419,11 @@ class Worker:
             "sample_rate": int(sr),
             "num_samples": int(num_samples),
             "metrics": {
+                "request_id": req_id,
                 "cache_hit": False,
                 "model_seconds": round(t_model1 - t_model0, 6),
                 "write_seconds": round(t_write1 - t_write0, 6),
-                "total_seconds": round(time.perf_counter() - t_all0, 6),
+                "total_seconds": round(t_total, 6),
             },
         }
 
@@ -517,15 +568,15 @@ def main() -> int:
             cmd = str(req.get("cmd", "")).strip().lower()
 
             if cmd == "health":
-                _write_response(
-                    {
-                        "ok": True,
-                        "ready": True,
-                        "model_kind": worker.model_kind,
-                        "speakers": worker.speakers,
-                        "languages": worker.languages,
-                    }
-                )
+                resp = {
+                    "ok": True,
+                    "ready": True,
+                    "model_kind": worker.model_kind,
+                    "speakers": worker.speakers,
+                    "languages": worker.languages,
+                }
+                resp.update(worker.runtime_info())
+                _write_response(resp)
                 continue
 
             if cmd == "list_voices":

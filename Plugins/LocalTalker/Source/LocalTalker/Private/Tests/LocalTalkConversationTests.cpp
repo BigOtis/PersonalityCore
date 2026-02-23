@@ -310,6 +310,16 @@ bool FLocalTalkPlayerInteractionComponentTest::RunTest(const FString& Parameters
         CleanupTalkers(Sub, AliceActor, Alice);
         return false;
     }
+    if (!PlayerActor->GetRootComponent())
+    {
+        USceneComponent* Root = NewObject<USceneComponent>(PlayerActor, TEXT("PlayerTestRoot"));
+        if (Root)
+        {
+            Root->RegisterComponent();
+            PlayerActor->SetRootComponent(Root);
+        }
+    }
+    PlayerActor->SetActorLocation(AIBase + FVector(50.0f, 0.0f, 0.0f));
 
     ULocalPlayerInteractionComponent* PlayerInteraction = NewObject<ULocalPlayerInteractionComponent>(PlayerActor);
     if (!PlayerInteraction)
@@ -323,6 +333,7 @@ bool FLocalTalkPlayerInteractionComponentTest::RunTest(const FString& Parameters
     PlayerInteraction->RegisterComponent();
 
     const FString PlayerPrompt = TEXT("Can you summarize the objective in one line?");
+    Sub->ClearContextHistory(Alice);
     const bool bSent = PlayerInteraction->SpeakToNearestAI(PlayerPrompt);
     TestTrue(TEXT("Player interaction component should submit prompt to nearest AI."), bSent);
 

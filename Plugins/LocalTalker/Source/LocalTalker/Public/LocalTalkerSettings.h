@@ -34,12 +34,18 @@ public:
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Qwen")
     bool bQwenUseFlashAttention = false;
 
+    // Number of shared Qwen worker processes kept alive for parallel synthesis.
+    // Use >1 to allow overlapping requests from multiple speakers.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Qwen", meta=(ClampMin="1", ClampMax="8"))
+    int32 QwenWorkerPoolSize = 1;
+
     // Timeout per TTS request (seconds) when waiting for Qwen worker response.
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Qwen", meta=(ClampMin="1.0"))
     float QwenRequestTimeoutSeconds = 180.0f;
 
-    // Cap for Qwen decoder steps per synthesis request. Lower values usually reduce latency.
-    // Set to 0 to use model defaults.
+    // Max cap for Qwen decoder steps per synthesis request.
+    // Runtime applies an additional sentence-length adaptive cap for latency stability.
+    // Set to 0 to rely only on adaptive cap.
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Qwen", meta=(ClampMin="0"))
     int32 QwenMaxNewTokens = 1536;
 
