@@ -147,7 +147,7 @@ struct FLocalTalkerRuntimePaths
 
     // Default language passed to Qwen generation APIs, usually "Auto".
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Qwen")
-    FString QwenLanguage = TEXT("Auto");
+    FString QwenLanguage = TEXT("English");
 
     // --- Legacy Piper runtime (deprecated) ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")

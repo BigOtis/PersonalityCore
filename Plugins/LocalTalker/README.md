@@ -125,6 +125,11 @@ Run from command line:
 - "Qwen synthesis failed"
   - Verify selected `QwenSpeaker` is valid for the loaded model
   - For Base model, provide `QwenVoicePromptPath` generated externally
+- "Qwen is much slower in UE than standalone Python"
+  - Ensure `DefaultPaths.QwenPythonExePath` points to your CUDA-enabled Python env (not just `python`).
+  - On hybrid-GPU systems, force UE to use the high-performance adapter:
+    - launch with `-graphicsadapter=1` (or your NVIDIA index), or set `r.GraphicsAdapter` in config.
+  - Confirm worker startup log reports `device='cuda:0'` and expected `python`/`torch` versions.
 - "Failed to load libllama.dll"
   - Check `DefaultPaths.LlamaLibPath`
   - Ensure `ggml*.dll` deps are present next to `libllama.dll`

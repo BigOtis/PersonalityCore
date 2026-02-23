@@ -547,6 +547,31 @@ static bool LocalTalkerHasAlphaNum(const FString& S)
     return false;
 }
 
+static bool LocalTalkerLooksMostlyAsciiEnglish(const FString& In)
+{
+    int32 AlphaCount = 0;
+    int32 AsciiAlphaCount = 0;
+    for (int32 i = 0; i < In.Len(); ++i)
+    {
+        const TCHAR C = In[i];
+        if (FChar::IsAlpha(C))
+        {
+            ++AlphaCount;
+            if (C >= 0 && C < 128)
+            {
+                ++AsciiAlphaCount;
+            }
+        }
+    }
+
+    if (AlphaCount <= 0)
+    {
+        return false;
+    }
+
+    return (AsciiAlphaCount * 100) >= (AlphaCount * 95);
+}
+
 static FString TrimSentence(const FString& In)
 {
     FString S = In;
@@ -1866,7 +1891,7 @@ FLocalTalkerRuntimePaths ULocalCharacterComponent::ResolvePaths() const
 
         if (Out.QwenLanguage.IsEmpty())
         {
-            Out.QwenLanguage = TEXT("Auto");
+            Out.QwenLanguage = TEXT("English");
         }
     }
 
@@ -2773,27 +2798,9 @@ void ULocalCharacterComponent::KickoffQwenPrewarmIfNeeded(const FLocalTalkerRunt
             return;
         }
 
-        TArray<uint8> WarmBytes;
-        int32 WarmRate = 0;
-        int32 WarmChannels = 0;
-        FString WarmErr;
-        if (!Owner->GenerateQwenAudioBytes(TEXT("Ready."), Paths, WarmBytes, WarmRate, WarmChannels, WarmErr))
-        {
-            UE_LOG(LogLocalTalker, Warning, TEXT("%s[%s] Qwen prewarm synth failed: %s"),
-                *LocalTalkerTimePrefix(Owner),
-                *Owner->GetSpeakerNameResolved(),
-                *WarmErr);
-            FScopeLock SharedLock(&GLocalTalkerSharedQwenWorkerMutex);
-            GLocalTalkerQwenPrewarmStarted = false;
-            return;
-        }
-
-        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen prewarm complete (bytes=%d rate=%d channels=%d)."),
+        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Qwen prewarm complete (worker init only)."),
             *LocalTalkerTimePrefix(Owner),
-            *Owner->GetSpeakerNameResolved(),
-            WarmBytes.Num(),
-            WarmRate,
-            WarmChannels);
+            *Owner->GetSpeakerNameResolved());
     });
 }
 
@@ -2926,10 +2933,16 @@ bool ULocalCharacterComponent::GenerateQwenAudioBytes(const FString& Sentence, c
         VoicePromptPath = FPaths::ConvertRelativePathToFull(VoicePromptPath);
     }
 
+    FString RequestLanguage = Paths.QwenLanguage.IsEmpty() ? TEXT("English") : Paths.QwenLanguage;
+    if (RequestLanguage.Equals(TEXT("Auto"), ESearchCase::IgnoreCase) && LocalTalkerLooksMostlyAsciiEnglish(Sentence))
+    {
+        RequestLanguage = TEXT("English");
+    }
+
     TSharedRef<FJsonObject> Req = MakeShared<FJsonObject>();
     Req->SetStringField(TEXT("cmd"), TEXT("synthesize"));
     Req->SetStringField(TEXT("text"), Sentence);
-    Req->SetStringField(TEXT("language"), Paths.QwenLanguage.IsEmpty() ? TEXT("Auto") : Paths.QwenLanguage);
+    Req->SetStringField(TEXT("language"), RequestLanguage);
     Req->SetStringField(TEXT("output_wav"), OutWav);
     Req->SetBoolField(TEXT("non_streaming_mode"), true);
     if (Settings)
