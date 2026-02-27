@@ -3,6 +3,7 @@
 
 Protocol: one JSON object per line over stdin/stdout.
 - {"cmd":"transcribe","id":"...","audio_path":"...","model":"base.en","language":"en","vad_filter":true,"cache_dir":"..."}
+- {"cmd":"preload","id":"...","model":"base.en","cache_dir":"..."}
 - {"cmd":"shutdown"}
 
 Response:
@@ -84,6 +85,25 @@ def _handle_transcribe(req: dict) -> dict:
         }
 
 
+def _handle_preload(req: dict) -> dict:
+    req_id = str(req.get("id", ""))
+    model_name = str(req.get("model", "base.en"))
+    cache_dir = str(req.get("cache_dir", "")).strip() or None
+
+    if not req_id:
+        return {"id": "", "ok": False, "error": "Missing request id."}
+
+    try:
+        _load_model(model_name, cache_dir)
+        return {"id": req_id, "ok": True, "event": "preloaded", "model": model_name}
+    except Exception as exc:  # pragma: no cover
+        return {
+            "id": req_id,
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 def main() -> int:
     for raw in sys.stdin:
         line = raw.strip()
@@ -103,6 +123,10 @@ def main() -> int:
 
         if cmd == "transcribe":
             _json_out(_handle_transcribe(req))
+            continue
+
+        if cmd == "preload":
+            _json_out(_handle_preload(req))
             continue
 
         _json_out({"id": str(req.get("id", "")), "ok": False, "error": f"Unknown command: {cmd}"})

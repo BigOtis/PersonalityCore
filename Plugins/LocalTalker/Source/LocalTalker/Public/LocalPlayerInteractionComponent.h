@@ -80,6 +80,10 @@ public:
     /** Transcribes provided PCM16 audio buffer asynchronously with Whisper. C++ use (not Blueprint-exposed). */
     bool TranscribePcm16Buffer(const TArray<int16>& Pcm16Interleaved, int32 SampleRate, int32 NumChannels, bool bSendToNearestAI = true, float MaxRange = -1.0f);
 
+    /** Starts the Whisper worker/model warmup in the background to reduce first-transcribe latency. */
+    UFUNCTION(BlueprintCallable, Category="LocalTalker|STT")
+    void PrimeWhisperWorkerAsync();
+
     /** Cancels active microphone capture without transcription. */
     UFUNCTION(BlueprintCallable, Category="LocalTalker|STT")
     void CancelMicrophoneCapture();
@@ -94,6 +98,7 @@ protected:
 private:
     bool ResolveMicDeviceIndex(int32& OutDeviceIndex, FString& OutResolvedName, FString& OutError) const;
     bool EnsureWhisperWorker(FString& OutError);
+    bool PreloadWhisperModelWithWorker(FString& OutError);
     void ShutdownWhisperWorker();
     bool TranscribeWavFileWithWhisper(const FString& WavPath, FString& OutText, FString& OutError);
     bool QueueTranscriptionFromPcm(TArray<int16>&& CapturedInterleavedPcm16, int32 SampleRate, int32 NumChannels, bool bSendToNearestAI, float MaxRange);

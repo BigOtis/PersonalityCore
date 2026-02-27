@@ -23,6 +23,7 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "UObject/UObjectIterator.h"
+#include "Templates/Atomic.h"
 
 struct FLocalPlayerWhisperWorker
 {
@@ -34,6 +35,8 @@ struct FLocalPlayerWhisperWorker
 
 static TUniquePtr<FLocalPlayerWhisperWorker> GLocalPlayerWhisperWorker;
 static FCriticalSection GLocalPlayerWhisperWorkerMutex;
+static TAtomic<bool> GLocalPlayerWhisperPrimed(false);
+static TAtomic<bool> GLocalPlayerWhisperPrimeInFlight(false);
 
 namespace
 {
@@ -570,6 +573,51 @@ bool ULocalPlayerInteractionComponent::TranscribePcm16Buffer(const TArray<int16>
     return QueueTranscriptionFromPcm(MoveTemp(Copy), SampleRate, NumChannels, bSendToNearestAI, MaxRange);
 }
 
+void ULocalPlayerInteractionComponent::PrimeWhisperWorkerAsync()
+{
+    if (GLocalPlayerWhisperPrimed.Load())
+    {
+        return;
+    }
+
+    bool bExpected = false;
+    if (!GLocalPlayerWhisperPrimeInFlight.CompareExchange(bExpected, true))
+    {
+        return;
+    }
+
+    TWeakObjectPtr<ULocalPlayerInteractionComponent> WeakThis(this);
+    Async(EAsyncExecution::ThreadPool, [WeakThis]()
+    {
+        FString Error;
+        bool bPrimed = false;
+
+        if (ULocalPlayerInteractionComponent* Self = WeakThis.Get())
+        {
+            bPrimed = Self->PreloadWhisperModelWithWorker(Error);
+        }
+        else
+        {
+            Error = TEXT("Whisper prime canceled: component no longer valid.");
+        }
+
+        AsyncTask(ENamedThreads::GameThread, [bPrimed, Error]()
+        {
+            if (bPrimed)
+            {
+                GLocalPlayerWhisperPrimed.Store(true);
+                UE_LOG(LogLocalTalker, Log, TEXT("[STT] Whisper worker primed (model preloaded)."));
+            }
+            else
+            {
+                UE_LOG(LogLocalTalker, Warning, TEXT("[STT] Whisper worker prime failed: %s"), *Error);
+            }
+
+            GLocalPlayerWhisperPrimeInFlight.Store(false);
+        });
+    });
+}
+
 bool ULocalPlayerInteractionComponent::QueueTranscriptionFromPcm(TArray<int16>&& CapturedInterleavedPcm16, int32 SampleRate, int32 NumChannels, bool bSendToNearestAI, float MaxRange)
 {
     if (CapturedInterleavedPcm16.Num() <= 0 || SampleRate <= 0 || NumChannels <= 0)
@@ -699,6 +747,98 @@ bool ULocalPlayerInteractionComponent::QueueTranscriptionFromPcm(TArray<int16>&&
     return true;
 }
 
+bool ULocalPlayerInteractionComponent::PreloadWhisperModelWithWorker(FString& OutError)
+{
+    OutError.Reset();
+
+    FScopeLock WorkerLock(&GLocalPlayerWhisperWorkerMutex);
+    if (!EnsureWhisperWorker(OutError))
+    {
+        return false;
+    }
+
+    const ULocalTalkerSettings* Settings = GetDefault<ULocalTalkerSettings>();
+    const FLocalTalkerRuntimePaths Paths = ResolveRuntimePaths();
+    const FString RequestId = FGuid::NewGuid().ToString(EGuidFormats::Digits);
+    const FString Model = Settings ? Settings->WhisperModel : TEXT("base.en");
+    const double TimeoutSeconds = static_cast<double>(Settings ? FMath::Clamp(Settings->WhisperRequestTimeoutSeconds, 5.0f, 30.0f) : 20.0f);
+
+    TSharedRef<FJsonObject> Request = MakeShared<FJsonObject>();
+    Request->SetStringField(TEXT("cmd"), TEXT("preload"));
+    Request->SetStringField(TEXT("id"), RequestId);
+    Request->SetStringField(TEXT("model"), Model);
+    if (!Paths.WhisperCacheDir.IsEmpty())
+    {
+        Request->SetStringField(TEXT("cache_dir"), Paths.WhisperCacheDir);
+    }
+
+    FString RequestLine;
+    if (!SerializeJsonLine(Request, RequestLine))
+    {
+        OutError = TEXT("Failed to serialize Whisper preload request JSON.");
+        return false;
+    }
+
+    if (!FLocalTalkerProcess::WriteStdin(GLocalPlayerWhisperWorker->Pipes, RequestLine))
+    {
+        OutError = TEXT("Failed to send Whisper preload request.");
+        return false;
+    }
+
+    const double StartSeconds = FPlatformTime::Seconds();
+    while ((FPlatformTime::Seconds() - StartSeconds) < TimeoutSeconds)
+    {
+        if (!GLocalPlayerWhisperWorker->Handle.IsValid() || !FPlatformProcess::IsProcRunning(GLocalPlayerWhisperWorker->Handle))
+        {
+            OutError = TEXT("Whisper worker terminated during preload.");
+            return false;
+        }
+
+        GLocalPlayerWhisperWorker->StdoutBuffer += FLocalTalkerProcess::ReadAvailable(GLocalPlayerWhisperWorker->Pipes.ReadPipe);
+        GLocalPlayerWhisperWorker->StderrBuffer += FLocalTalkerProcess::ReadAvailable(GLocalPlayerWhisperWorker->Pipes.ReadErrPipe);
+
+        FString Line;
+        while (TryPopLine(GLocalPlayerWhisperWorker->StderrBuffer, Line))
+        {
+            UE_LOG(LogLocalTalker, Verbose, TEXT("[STT][whisper stderr] %s"), *Line);
+        }
+
+        while (TryPopLine(GLocalPlayerWhisperWorker->StdoutBuffer, Line))
+        {
+            TSharedPtr<FJsonObject> Json;
+            if (!ParseJsonLine(Line, Json) || !Json.IsValid())
+            {
+                UE_LOG(LogLocalTalker, Verbose, TEXT("[STT][whisper stdout] %s"), *Line);
+                continue;
+            }
+
+            FString ResponseId;
+            if (!Json->TryGetStringField(TEXT("id"), ResponseId) || ResponseId != RequestId)
+            {
+                continue;
+            }
+
+            bool bOk = false;
+            Json->TryGetBoolField(TEXT("ok"), bOk);
+            if (!bOk)
+            {
+                if (!Json->TryGetStringField(TEXT("error"), OutError) || OutError.IsEmpty())
+                {
+                    OutError = TEXT("Whisper preload failed with unknown worker error.");
+                }
+                return false;
+            }
+
+            return true;
+        }
+
+        FPlatformProcess::Sleep(0.01f);
+    }
+
+    OutError = FString::Printf(TEXT("Whisper preload timed out after %.1f seconds."), TimeoutSeconds);
+    return false;
+}
+
 bool ULocalPlayerInteractionComponent::EnsureWhisperWorker(FString& OutError)
 {
     OutError.Reset();
@@ -718,6 +858,7 @@ bool ULocalPlayerInteractionComponent::EnsureWhisperWorker(FString& OutError)
         FPlatformProcess::TerminateProc(GLocalPlayerWhisperWorker->Handle, true);
         FPlatformProcess::CloseProc(GLocalPlayerWhisperWorker->Handle);
         GLocalPlayerWhisperWorker->Handle.Reset();
+        GLocalPlayerWhisperPrimed.Store(false);
     }
     FLocalTalkerProcess::ClosePipes(GLocalPlayerWhisperWorker->Pipes);
     GLocalPlayerWhisperWorker->StdoutBuffer.Reset();
@@ -922,4 +1063,6 @@ void ULocalPlayerInteractionComponent::ShutdownWhisperWorker()
 
     FLocalTalkerProcess::ClosePipes(GLocalPlayerWhisperWorker->Pipes);
     GLocalPlayerWhisperWorker.Reset();
+    GLocalPlayerWhisperPrimed.Store(false);
+    GLocalPlayerWhisperPrimeInFlight.Store(false);
 }

@@ -57,18 +57,24 @@ void UAutoChatVoiceInputComponent::BeginPlay()
         *ModeStr,
         MicInputDeviceName.IsEmpty() ? TEXT("<Default>") : *MicInputDeviceName);
     UE_LOG(LogAutoChatVoice, Log,
-        TEXT("[AutoChatVoiceInput] STT mode: alwaysOn=%d startRms=%.4f continueRms=%.4f bargeInRms=%.4f silenceEnd=%.2fs minSpeech=%.2fs maxSpeech=%.2fs bargeHold=%.2fs postSegHold=%.2fs postTextHold=%.2fs fenceMax=%.2fs"),
+        TEXT("[AutoChatVoiceInput] STT mode: alwaysOn=%d startRms=%.4f continueRms=%.4f bargeInRms=%.4f bargeMinActive=%.2fs bargeMinLoud=%.2fs bargeVeryLoud=%.3f silenceEnd=%.2fs minSpeech=%.2fs maxSpeech=%.2fs minActive=%.2fs minActiveRatio=%.2f bargeHold=%.2fs postSegHold=%.2fs postTextHold=%.2fs fenceMax=%.2fs rotateSingle=%d"),
         bAlwaysOnAutoTranscribe ? 1 : 0,
         AutoTranscribeStartRmsThreshold,
         AutoTranscribeContinueRmsThreshold,
         BargeInMinRmsThreshold,
+        BargeInMinActiveSpeechSeconds,
+        BargeInMinLoudSeconds,
+        BargeInVeryLoudRmsThreshold,
         AutoTranscribeSilenceSeconds,
         AutoTranscribeMinSpeechSeconds,
         AutoTranscribeMaxSpeechSeconds,
+        AutoTranscribeMinActiveSpeechSeconds,
+        AutoTranscribeMinActiveRatio,
         BargeInPriorityHoldSeconds,
         PostSegmentPriorityHoldSeconds,
         PostTranscriptPriorityHoldSeconds,
-        PlayerSpeechFenceMaxSeconds);
+        PlayerSpeechFenceMaxSeconds,
+        bRotateSingleTargetAcrossNearby ? 1 : 0);
 
     // Also log the available microphone devices from LocalTalker.
     if (const ULocalTalkerSettings* Settings = GetDefault<ULocalTalkerSettings>())
@@ -115,6 +121,11 @@ void UAutoChatVoiceInputComponent::BeginPlay()
     // Start a lightweight mic level monitor so we can confirm that audio input
     // is flowing from the selected device (even before STT is wired up).
     StartMicCapture();
+
+    if (bPrewarmWhisperOnBeginPlay && EnsureWhisperBridge() && WhisperBridgeComponent)
+    {
+        WhisperBridgeComponent->PrimeWhisperWorkerAsync();
+    }
 }
 
 void UAutoChatVoiceInputComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -138,6 +149,9 @@ void UAutoChatVoiceInputComponent::EndPlay(const EEndPlayReason::Type EndPlayRea
     AutoSpeechLastActiveWorldSeconds = 0.0;
     AutoSpeechSampleRate = 0;
     AutoSpeechNumChannels = 0;
+    AutoSpeechTotalFrames = 0;
+    AutoSpeechActiveFrames = 0;
+    AutoSpeechLoudFrames = 0;
     AutoSpeechPcm16.Reset();
     StopMicCapture();
     Super::EndPlay(EndPlayReason);
@@ -204,6 +218,9 @@ bool UAutoChatVoiceInputComponent::BeginVoiceCapture()
 
     bAutoSpeechSegmentActive = false;
     bAutoSpeechSegmentBargeInTriggered = false;
+    AutoSpeechTotalFrames = 0;
+    AutoSpeechActiveFrames = 0;
+    AutoSpeechLoudFrames = 0;
     AutoSpeechPcm16.Reset();
 
     if (!EnsureWhisperBridge() || !WhisperBridgeComponent)
@@ -559,9 +576,24 @@ bool UAutoChatVoiceInputComponent::SubmitRecognizedSpeech(const FString& Transcr
 
     int32 RoutedCount = 0;
     const int32 NumToRoute = bBroadcastToAllNearby ? Targets.Num() : 1;
+    int32 StartIndex = 0;
+    if (!bBroadcastToAllNearby && bRotateSingleTargetAcrossNearby && Targets.Num() > 1)
+    {
+        if (LastSingleTargetRouteIndex < 0 || LastSingleTargetRouteIndex >= Targets.Num())
+        {
+            LastSingleTargetRouteIndex = 0;
+        }
+        else
+        {
+            LastSingleTargetRouteIndex = (LastSingleTargetRouteIndex + 1) % Targets.Num();
+        }
+        StartIndex = LastSingleTargetRouteIndex;
+    }
+
     for (int32 i = 0; i < NumToRoute; ++i)
     {
-        ULocalCharacterComponent* Target = Targets[i];
+        const int32 TargetIndex = bBroadcastToAllNearby ? i : StartIndex;
+        ULocalCharacterComponent* Target = Targets.IsValidIndex(TargetIndex) ? Targets[TargetIndex] : nullptr;
         if (!Target)
         {
             continue;
@@ -574,10 +606,12 @@ bool UAutoChatVoiceInputComponent::SubmitRecognizedSpeech(const FString& Transcr
 
         const FString TargetOwnerName = Target->GetOwner() ? Target->GetOwner()->GetName() : TEXT("<NoOwner>");
         UE_LOG(LogAutoChatVoice, Log,
-            TEXT("[AutoChatVoiceInput] Routing transcript to AI \"%s\" at index %d/%d"),
+            TEXT("[AutoChatVoiceInput] Routing transcript to AI \"%s\" at index %d/%d (targetIndex=%d rotateSingle=%d)"),
             *TargetOwnerName,
             i + 1,
-            NumToRoute);
+            NumToRoute,
+            TargetIndex,
+            (!bBroadcastToAllNearby && bRotateSingleTargetAcrossNearby) ? 1 : 0);
 
         Sub->RequestTurn(Target, Text, /*bFromUser*/true);
         ++RoutedCount;
@@ -888,6 +922,9 @@ void UAutoChatVoiceInputComponent::StartMicCapture()
     NextMicActivityLogTimeSeconds = 0.0;
     bAutoSpeechSegmentActive = false;
     bAutoSpeechSegmentBargeInTriggered = false;
+    AutoSpeechTotalFrames = 0;
+    AutoSpeechActiveFrames = 0;
+    AutoSpeechLoudFrames = 0;
     AutoSpeechPcm16.Reset();
     AutoSpeechSampleRate = 0;
     AutoSpeechNumChannels = 0;
@@ -910,6 +947,9 @@ void UAutoChatVoiceInputComponent::StopMicCapture()
     bMicCaptureActive = false;
     bAutoSpeechSegmentActive = false;
     bAutoSpeechSegmentBargeInTriggered = false;
+    AutoSpeechTotalFrames = 0;
+    AutoSpeechActiveFrames = 0;
+    AutoSpeechLoudFrames = 0;
     AutoSpeechPcm16.Reset();
     AutoSpeechSampleRate = 0;
     AutoSpeechNumChannels = 0;
@@ -954,7 +994,14 @@ void UAutoChatVoiceInputComponent::OnAudioCapture(const float* AudioData, int32 
     const double MeanSq = SumSq / (double)NumSamples;
     const float Rms = (float)FMath::Sqrt((float)MeanSq);
 
-    // Simple threshold to decide whether there's "voice-like" activity.
+    // Always feed segment logic, including silence frames, so segment end timing
+    // is based on real elapsed silence rather than delayed until next noise spike.
+    if (bAlwaysOnAutoTranscribe)
+    {
+        ProcessAlwaysOnAutoTranscribe(AudioData, NumFrames, NumChannels, SampleRate, Rms);
+    }
+
+    // Simple threshold to decide whether there's "voice-like" activity for logs/UI.
     static constexpr float ActivityThreshold = 0.01f;
     if (Rms < ActivityThreshold)
     {
@@ -969,11 +1016,6 @@ void UAutoChatVoiceInputComponent::OnAudioCapture(const float* AudioData, int32 
             NextMicActivityLogTimeSeconds = Now + 1.0;
             UE_LOG(LogAutoChatVoice, Log, TEXT("[AutoChatVoiceInput] Mic activity detected (rms=%.4f samples=%d)."), Rms, NumSamples);
         }
-    }
-
-    if (bAlwaysOnAutoTranscribe)
-    {
-        ProcessAlwaysOnAutoTranscribe(AudioData, NumFrames, NumChannels, SampleRate, Rms);
     }
 
     // Hop to the game thread to ping the mic widget.
@@ -1028,6 +1070,56 @@ void UAutoChatVoiceInputComponent::ProcessAlwaysOnAutoTranscribe(const float* Au
         }
     };
 
+    auto TryTriggerBargeIn = [&](const TCHAR* Phase)
+    {
+        if (bAutoSpeechSegmentBargeInTriggered || !bInterruptNearbyAIOnVoiceCaptureStart)
+        {
+            return;
+        }
+
+        const double SinceSubmit = Now - LastTranscriptSubmitWorldSeconds;
+        if (SinceSubmit < TranscriptSubmitBargeInGraceSeconds)
+        {
+            return;
+        }
+
+        const double ActiveSeconds = (AutoSpeechSampleRate > 0)
+            ? (double)AutoSpeechActiveFrames / (double)AutoSpeechSampleRate
+            : 0.0;
+        const double LoudSeconds = (AutoSpeechSampleRate > 0)
+            ? (double)AutoSpeechLoudFrames / (double)AutoSpeechSampleRate
+            : 0.0;
+
+        const bool bSustainedVoiceForBargeIn =
+            ActiveSeconds >= (double)BargeInMinActiveSpeechSeconds &&
+            LoudSeconds >= (double)BargeInMinLoudSeconds;
+        const bool bVeryLoudOverride =
+            Rms >= BargeInVeryLoudRmsThreshold &&
+            ActiveSeconds >= (double)BargeInMinActiveSpeechSeconds;
+
+        if (!bSustainedVoiceForBargeIn && !bVeryLoudOverride)
+        {
+            return;
+        }
+
+        bAutoSpeechSegmentBargeInTriggered = true;
+        UE_LOG(LogAutoChatVoice, Log,
+            TEXT("[AutoChatVoiceInput] AlwaysOn barge-in trigger %s (rms=%.4f active=%.2fs loud=%.2fs sustained=%d veryLoud=%d)."),
+            Phase ? Phase : TEXT("UNKNOWN"),
+            Rms,
+            ActiveSeconds,
+            LoudSeconds,
+            bSustainedVoiceForBargeIn ? 1 : 0,
+            bVeryLoudOverride ? 1 : 0);
+        AsyncTask(ENamedThreads::GameThread, [WeakThis = TWeakObjectPtr<UAutoChatVoiceInputComponent>(this)]()
+        {
+            if (UAutoChatVoiceInputComponent* Self = WeakThis.Get())
+            {
+                Self->InterruptNearbyAIsForPlayerSpeech();
+            }
+        });
+    };
+
     if (!bAutoSpeechSegmentActive)
     {
         if (Rms >= AutoTranscribeStartRmsThreshold)
@@ -1038,9 +1130,21 @@ void UAutoChatVoiceInputComponent::ProcessAlwaysOnAutoTranscribe(const float* Au
             AutoSpeechLastActiveWorldSeconds = Now;
             AutoSpeechSampleRate = SampleRate;
             AutoSpeechNumChannels = NumChannels;
+            AutoSpeechTotalFrames = 0;
+            AutoSpeechActiveFrames = 0;
+            AutoSpeechLoudFrames = 0;
             AutoSpeechPcm16.Reset();
             AutoSpeechPcm16.Reserve(NumSamples * 8);
             AppendChunkPcm16();
+            AutoSpeechTotalFrames += NumFrames;
+            if (Rms >= AutoTranscribeContinueRmsThreshold)
+            {
+                AutoSpeechActiveFrames += NumFrames;
+            }
+            if (Rms >= BargeInMinRmsThreshold)
+            {
+                AutoSpeechLoudFrames += NumFrames;
+            }
 
             UE_LOG(LogAutoChatVoice, Log,
                 TEXT("[AutoChatVoiceInput] AlwaysOn segment START (rms=%.4f sr=%d ch=%d)."),
@@ -1056,23 +1160,7 @@ void UAutoChatVoiceInputComponent::ProcessAlwaysOnAutoTranscribe(const float* Au
                 }
             });
 
-            const double SinceSubmit = Now - LastTranscriptSubmitWorldSeconds;
-            if (bInterruptNearbyAIOnVoiceCaptureStart &&
-                Rms >= BargeInMinRmsThreshold &&
-                SinceSubmit >= TranscriptSubmitBargeInGraceSeconds)
-            {
-                bAutoSpeechSegmentBargeInTriggered = true;
-                UE_LOG(LogAutoChatVoice, Log,
-                    TEXT("[AutoChatVoiceInput] AlwaysOn barge-in trigger at segment START (rms=%.4f)."),
-                    Rms);
-                AsyncTask(ENamedThreads::GameThread, [WeakThis = TWeakObjectPtr<UAutoChatVoiceInputComponent>(this)]()
-                {
-                    if (UAutoChatVoiceInputComponent* Self = WeakThis.Get())
-                    {
-                        Self->InterruptNearbyAIsForPlayerSpeech();
-                    }
-                });
-            }
+            TryTriggerBargeIn(TEXT("at segment START"));
         }
         return;
     }
@@ -1088,6 +1176,9 @@ void UAutoChatVoiceInputComponent::ProcessAlwaysOnAutoTranscribe(const float* Au
             NumChannels);
         bAutoSpeechSegmentActive = false;
         bAutoSpeechSegmentBargeInTriggered = false;
+        AutoSpeechTotalFrames = 0;
+        AutoSpeechActiveFrames = 0;
+        AutoSpeechLoudFrames = 0;
         AutoSpeechPcm16.Reset();
         AutoSpeechSampleRate = 0;
         AutoSpeechNumChannels = 0;
@@ -1095,31 +1186,17 @@ void UAutoChatVoiceInputComponent::ProcessAlwaysOnAutoTranscribe(const float* Au
     }
 
     AppendChunkPcm16();
+    AutoSpeechTotalFrames += NumFrames;
     if (Rms >= AutoTranscribeContinueRmsThreshold)
     {
+        AutoSpeechActiveFrames += NumFrames;
         AutoSpeechLastActiveWorldSeconds = Now;
     }
-
-    if (!bAutoSpeechSegmentBargeInTriggered &&
-        bInterruptNearbyAIOnVoiceCaptureStart &&
-        Rms >= BargeInMinRmsThreshold)
+    if (Rms >= BargeInMinRmsThreshold)
     {
-        const double SinceSubmit = Now - LastTranscriptSubmitWorldSeconds;
-        if (SinceSubmit >= TranscriptSubmitBargeInGraceSeconds)
-        {
-            bAutoSpeechSegmentBargeInTriggered = true;
-            UE_LOG(LogAutoChatVoice, Log,
-                TEXT("[AutoChatVoiceInput] AlwaysOn barge-in trigger DURING segment (rms=%.4f)."),
-                Rms);
-            AsyncTask(ENamedThreads::GameThread, [WeakThis = TWeakObjectPtr<UAutoChatVoiceInputComponent>(this)]()
-            {
-                if (UAutoChatVoiceInputComponent* Self = WeakThis.Get())
-                {
-                    Self->InterruptNearbyAIsForPlayerSpeech();
-                }
-            });
-        }
+        AutoSpeechLoudFrames += NumFrames;
     }
+    TryTriggerBargeIn(TEXT("DURING segment"));
 
     const double SegmentSeconds = Now - AutoSpeechStartWorldSeconds;
     const double SilenceSeconds = Now - AutoSpeechLastActiveWorldSeconds;
@@ -1134,15 +1211,26 @@ void UAutoChatVoiceInputComponent::ProcessAlwaysOnAutoTranscribe(const float* Au
     TArray<int16> SegmentPcm = MoveTemp(AutoSpeechPcm16);
     const int32 SegmentSampleRate = AutoSpeechSampleRate;
     const int32 SegmentNumChannels = AutoSpeechNumChannels;
+    const int32 SegmentTotalFrames = AutoSpeechTotalFrames;
+    const int32 SegmentActiveFrames = AutoSpeechActiveFrames;
     bAutoSpeechSegmentActive = false;
     bAutoSpeechSegmentBargeInTriggered = false;
     AutoSpeechSampleRate = 0;
     AutoSpeechNumChannels = 0;
+    AutoSpeechTotalFrames = 0;
+    AutoSpeechActiveFrames = 0;
+    AutoSpeechLoudFrames = 0;
     AutoSpeechStartWorldSeconds = 0.0;
     AutoSpeechLastActiveWorldSeconds = 0.0;
 
     const double BufferSeconds = (SegmentSampleRate > 0 && SegmentNumChannels > 0)
         ? ((double)SegmentPcm.Num() / (double)(SegmentSampleRate * SegmentNumChannels))
+        : 0.0;
+    const double ActiveSpeechSeconds = (SegmentSampleRate > 0)
+        ? ((double)SegmentActiveFrames / (double)SegmentSampleRate)
+        : 0.0;
+    const double ActiveRatio = (SegmentTotalFrames > 0)
+        ? ((double)SegmentActiveFrames / (double)SegmentTotalFrames)
         : 0.0;
 
     if (BufferSeconds < (double)AutoTranscribeMinSpeechSeconds)
@@ -1158,6 +1246,28 @@ void UAutoChatVoiceInputComponent::ProcessAlwaysOnAutoTranscribe(const float* Au
             if (UAutoChatVoiceInputComponent* Self = WeakThis.Get())
             {
                 Self->EndPlayerSpeechFence(TEXT("always_on_segment_too_short"));
+            }
+        });
+        return;
+    }
+
+    if (ActiveSpeechSeconds < (double)AutoTranscribeMinActiveSpeechSeconds ||
+        ActiveRatio < (double)AutoTranscribeMinActiveRatio)
+    {
+        UE_LOG(LogAutoChatVoice, Log,
+            TEXT("[AutoChatVoiceInput] AlwaysOn segment dropped (likely non-voice: active=%.2fs ratio=%.2f minActive=%.2fs minRatio=%.2f dur=%.2fs samples=%d)."),
+            ActiveSpeechSeconds,
+            ActiveRatio,
+            AutoTranscribeMinActiveSpeechSeconds,
+            AutoTranscribeMinActiveRatio,
+            BufferSeconds,
+            SegmentPcm.Num());
+        bAutoTranscribeRequestInFlight = false;
+        AsyncTask(ENamedThreads::GameThread, [WeakThis = TWeakObjectPtr<UAutoChatVoiceInputComponent>(this)]()
+        {
+            if (UAutoChatVoiceInputComponent* Self = WeakThis.Get())
+            {
+                Self->EndPlayerSpeechFence(TEXT("always_on_segment_non_voice"));
             }
         });
         return;

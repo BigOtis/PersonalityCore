@@ -35,6 +35,10 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice")
     bool bBroadcastToAllNearby = false;
 
+    /** If true and not broadcasting, rotate target selection across nearby AIs instead of always nearest. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice")
+    bool bRotateSingleTargetAcrossNearby = true;
+
     /** Apply selected mic settings onto target AI components before routing text. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice")
     bool bApplyMicSelectionToTargetAI = true;
@@ -45,7 +49,19 @@ public:
 
     /** Minimum RMS to trigger barge-in (interrupt AI). Use a higher value than AutoTranscribeStartRmsThreshold to avoid noise. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.001", ClampMax="1.0"))
-    float BargeInMinRmsThreshold = 0.035f;
+    float BargeInMinRmsThreshold = 0.045f;
+
+    /** Require this much sustained active speech before barge-in can interrupt AI. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.01", ClampMax="2.0"))
+    float BargeInMinActiveSpeechSeconds = 0.28f;
+
+    /** Require this much sustained loud activity (RMS >= BargeInMinRmsThreshold) before barge-in can interrupt AI. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.01", ClampMax="2.0"))
+    float BargeInMinLoudSeconds = 0.14f;
+
+    /** Very high RMS may interrupt sooner, but still requires short active speech accumulation. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.05", ClampMax="1.0"))
+    float BargeInVeryLoudRmsThreshold = 0.20f;
 
     /** If true, clear queued NPC turns near the player when voice capture begins so new player speech is prioritized. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice")
@@ -55,25 +71,37 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice")
     bool bAlwaysOnAutoTranscribe = true;
 
+    /** Pre-start the Whisper worker/model in the background on BeginPlay to reduce first-transcript latency. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice")
+    bool bPrewarmWhisperOnBeginPlay = true;
+
     /** RMS threshold to start a speech segment in always-on mode. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.001", ClampMax="1.0"))
-    float AutoTranscribeStartRmsThreshold = 0.020f;
+    float AutoTranscribeStartRmsThreshold = 0.024f;
 
     /** RMS threshold to continue speech segment in always-on mode. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.001", ClampMax="1.0"))
-    float AutoTranscribeContinueRmsThreshold = 0.012f;
+    float AutoTranscribeContinueRmsThreshold = 0.014f;
 
     /** Silence time required to end speech segment and trigger transcription. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.10", ClampMax="3.0"))
-    float AutoTranscribeSilenceSeconds = 0.65f;
+    float AutoTranscribeSilenceSeconds = 0.45f;
 
     /** Minimum utterance length (seconds) required to submit transcription. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.10", ClampMax="5.0"))
-    float AutoTranscribeMinSpeechSeconds = 0.35f;
+    float AutoTranscribeMinSpeechSeconds = 0.25f;
 
     /** Hard cap for a single utterance in always-on mode. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="1.0", ClampMax="30.0"))
-    float AutoTranscribeMaxSpeechSeconds = 12.0f;
+    float AutoTranscribeMaxSpeechSeconds = 8.0f;
+
+    /** Require at least this much speech-active audio inside a segment before sending to Whisper. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.01", ClampMax="5.0"))
+    float AutoTranscribeMinActiveSpeechSeconds = 0.22f;
+
+    /** Minimum speech-active ratio for a segment to be considered voice rather than impulse/background noise. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.01", ClampMax="1.0"))
+    float AutoTranscribeMinActiveRatio = 0.22f;
 
     /** Seconds to keep Director-level player priority active after a loud barge-in interrupt. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.25", ClampMax="20.0"))
@@ -241,10 +269,14 @@ private:
     double AutoSpeechLastActiveWorldSeconds = 0.0;
     int32 AutoSpeechSampleRate = 0;
     int32 AutoSpeechNumChannels = 0;
+    int32 AutoSpeechTotalFrames = 0;
+    int32 AutoSpeechActiveFrames = 0;
+    int32 AutoSpeechLoudFrames = 0;
     TArray<int16> AutoSpeechPcm16;
 
     /** World time when we last submitted a transcript; used to skip barge-in briefly so the AI can respond. */
     double LastTranscriptSubmitWorldSeconds = 0.0;
+    int32 LastSingleTargetRouteIndex = INDEX_NONE;
     /** Seconds after submitting a transcript during which segment START does not trigger barge-in. */
     static constexpr double TranscriptSubmitBargeInGraceSeconds = 2.5;
 };
