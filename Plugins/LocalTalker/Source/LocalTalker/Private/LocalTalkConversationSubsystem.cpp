@@ -62,8 +62,27 @@ TStatId ULocalTalkConversationSubsystem::GetStatId() const
 
 void ULocalTalkConversationSubsystem::Tick(float DeltaTime)
 {
+    (void)DeltaTime;
+
     // Cleanup invalid actors from registry
     Registry.Remove(nullptr);
+
+    const UWorld* W = GetWorld();
+    const double Now = W ? (double)W->GetTimeSeconds() : 0.0;
+    if (bPlayerSpeechPriorityActive && Now > PlayerSpeechPriorityUntilWorldSeconds)
+    {
+        UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] PlayerSpeechPriority expired."), *LocalTalkerTimePrefixSubsystem(this));
+        bPlayerSpeechPriorityActive = false;
+        PlayerSpeechPriorityRadius = 0.0f;
+        PlayerSpeechPriorityUntilWorldSeconds = 0.0;
+    }
+    if (bPlayerSpeechFenceActive && Now > PlayerSpeechFenceUntilWorldSeconds)
+    {
+        UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] PlayerSpeechFence timed out."), *LocalTalkerTimePrefixSubsystem(this));
+        bPlayerSpeechFenceActive = false;
+        PlayerSpeechFenceRadius = 0.0f;
+        PlayerSpeechFenceUntilWorldSeconds = 0.0;
+    }
     
     UpdateContexts();
     ProcessTurns();
@@ -92,40 +111,62 @@ void ULocalTalkConversationSubsystem::UnregisterTalker(ULocalCharacterComponent*
     UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] Unregistered: '%s'"), *LocalTalkerTimePrefixSubsystem(this), *Name);
 }
 
-void ULocalTalkConversationSubsystem::RequestTurn(ULocalCharacterComponent* Talker, const FString& Prompt)
+void ULocalTalkConversationSubsystem::RequestTurn(ULocalCharacterComponent* Talker, const FString& Prompt, bool bFromUser)
 {
     if (!Talker || Prompt.IsEmpty()) return;
 
     const UWorld* W = GetWorld();
     const double Now = W ? (double)W->GetTimeSeconds() : 0.0;
 
-    // If it's a user prompt (not RAW and not a Director/internal instruction), add to history.
-    if (!Prompt.StartsWith(TEXT("RAW:")) &&
-        !Prompt.StartsWith(TEXT("Respond to ")) &&
-        !Prompt.StartsWith(TEXT("Director instruction:"), ESearchCase::IgnoreCase) &&
-        !Prompt.StartsWith(TEXT("Instruction:"), ESearchCase::IgnoreCase))
+    // User prompt path: record in history and keep a short priority window.
+    if (bFromUser)
     {
         if (FLocalConversationContext* Context = FindOrCreateContext(Talker))
         {
             AddMessageToContext(*Context, TEXT("User"), Prompt, true);
         }
+
+        if (Talker->GetOwner())
+        {
+            constexpr float UserPromptPrioritySeconds = 3.0f;
+            SetPlayerSpeechPriorityWindow(
+                Talker->GetOwner()->GetActorLocation(),
+                FMath::Max(1.0f, Talker->GetHearingRadius()),
+                UserPromptPrioritySeconds);
+        }
     }
 
-    EnqueueTurn(Talker, Prompt, Now);
+    EnqueueTurn(Talker, Prompt, Now, bFromUser);
 }
 
-void ULocalTalkConversationSubsystem::EnqueueTurn(ULocalCharacterComponent* Talker, const FString& Prompt, double EarliestGrantWorldSeconds)
+void ULocalTalkConversationSubsystem::EnqueueTurn(ULocalCharacterComponent* Talker, const FString& Prompt, double EarliestGrantWorldSeconds, bool bFromUser)
 {
     if (!Talker || Prompt.IsEmpty()) return;
 
-    // Check if they are already in the queue - if so, update their prompt
+    // Check if they are already in the queue - if so, update/upgrade in place.
     for (FQueuedTurn& Q : ManualQueue)
     {
         if (Q.Talker.Get() == Talker)
         {
+            // Never downgrade an existing user request into a non-user one.
+            if (Q.bFromUser && !bFromUser)
+            {
+                return;
+            }
+
             Q.Prompt = Prompt;
-            // Preserve the later of the existing earliest time and the new one.
-            Q.EarliestGrantWorldSeconds = FMath::Max(Q.EarliestGrantWorldSeconds, EarliestGrantWorldSeconds);
+            Q.bFromUser = bFromUser;
+
+            // User prompts should be granted as soon as possible.
+            if (bFromUser)
+            {
+                Q.EarliestGrantWorldSeconds = EarliestGrantWorldSeconds;
+            }
+            else
+            {
+                // Preserve the later of the existing earliest time and the new one.
+                Q.EarliestGrantWorldSeconds = FMath::Max(Q.EarliestGrantWorldSeconds, EarliestGrantWorldSeconds);
+            }
             return;
         }
     }
@@ -133,6 +174,7 @@ void ULocalTalkConversationSubsystem::EnqueueTurn(ULocalCharacterComponent* Talk
     FQueuedTurn NewTurn;
     NewTurn.Talker = Talker;
     NewTurn.Prompt = Prompt;
+    NewTurn.bFromUser = bFromUser;
     NewTurn.EarliestGrantWorldSeconds = EarliestGrantWorldSeconds;
     ManualQueue.Add(MoveTemp(NewTurn));
     
@@ -237,6 +279,158 @@ void ULocalTalkConversationSubsystem::NotifyAudioFinished(ULocalCharacterCompone
     }
 }
 
+bool ULocalTalkConversationSubsystem::IsPlayerSpeechPriorityActive(double NowWorldSeconds) const
+{
+    return bPlayerSpeechPriorityActive && (NowWorldSeconds <= PlayerSpeechPriorityUntilWorldSeconds);
+}
+
+bool ULocalTalkConversationSubsystem::IsPlayerSpeechFenceActive(double NowWorldSeconds) const
+{
+    return bPlayerSpeechFenceActive && (NowWorldSeconds <= PlayerSpeechFenceUntilWorldSeconds);
+}
+
+bool ULocalTalkConversationSubsystem::IsTalkerWithinPlayerSpeechFence(const ULocalCharacterComponent* Talker, double NowWorldSeconds) const
+{
+    if (!IsPlayerSpeechFenceActive(NowWorldSeconds) || !Talker || !Talker->GetOwner())
+    {
+        return false;
+    }
+
+    const float Radius = FMath::Max(1.0f, PlayerSpeechFenceRadius);
+    return FVector::DistSquared(Talker->GetOwner()->GetActorLocation(), PlayerSpeechFenceCenter) <= (Radius * Radius);
+}
+
+bool ULocalTalkConversationSubsystem::IsContextWithinPlayerSpeechFence(const FLocalConversationContext& Context, double NowWorldSeconds) const
+{
+    if (!IsPlayerSpeechFenceActive(NowWorldSeconds))
+    {
+        return false;
+    }
+
+    for (const TWeakObjectPtr<ULocalCharacterComponent>& Weak : Context.Participants)
+    {
+        if (const ULocalCharacterComponent* P = Weak.Get())
+        {
+            if (IsTalkerWithinPlayerSpeechFence(P, NowWorldSeconds))
+            {
+                return true;
+            }
+        }
+    }
+
+    const float Radius = FMath::Max(1.0f, PlayerSpeechFenceRadius);
+    return FVector::DistSquared(Context.LastCenter, PlayerSpeechFenceCenter) <= (Radius * Radius);
+}
+
+bool ULocalTalkConversationSubsystem::IsTalkerWithinPlayerPriorityWindow(const ULocalCharacterComponent* Talker, double NowWorldSeconds) const
+{
+    if (IsTalkerWithinPlayerSpeechFence(Talker, NowWorldSeconds))
+    {
+        return true;
+    }
+
+    if (!IsPlayerSpeechPriorityActive(NowWorldSeconds) || !Talker || !Talker->GetOwner())
+    {
+        return false;
+    }
+
+    const float Radius = FMath::Max(1.0f, PlayerSpeechPriorityRadius);
+    return FVector::DistSquared(Talker->GetOwner()->GetActorLocation(), PlayerSpeechPriorityCenter) <= (Radius * Radius);
+}
+
+bool ULocalTalkConversationSubsystem::IsContextWithinPlayerPriorityWindow(const FLocalConversationContext& Context, double NowWorldSeconds) const
+{
+    if (IsContextWithinPlayerSpeechFence(Context, NowWorldSeconds))
+    {
+        return true;
+    }
+
+    if (!IsPlayerSpeechPriorityActive(NowWorldSeconds))
+    {
+        return false;
+    }
+
+    for (const TWeakObjectPtr<ULocalCharacterComponent>& Weak : Context.Participants)
+    {
+        if (const ULocalCharacterComponent* P = Weak.Get())
+        {
+            if (IsTalkerWithinPlayerPriorityWindow(P, NowWorldSeconds))
+            {
+                return true;
+            }
+        }
+    }
+
+    const float Radius = FMath::Max(1.0f, PlayerSpeechPriorityRadius);
+    return FVector::DistSquared(Context.LastCenter, PlayerSpeechPriorityCenter) <= (Radius * Radius);
+}
+
+void ULocalTalkConversationSubsystem::SetPlayerSpeechPriorityWindow(const FVector& Location, float Radius, float HoldSeconds)
+{
+    const UWorld* W = GetWorld();
+    const double Now = W ? (double)W->GetTimeSeconds() : 0.0;
+    const double Hold = (double)FMath::Max(0.0f, HoldSeconds);
+    if (Hold <= 0.0)
+    {
+        return;
+    }
+
+    bPlayerSpeechPriorityActive = true;
+    PlayerSpeechPriorityCenter = Location;
+    PlayerSpeechPriorityRadius = FMath::Max(1.0f, Radius);
+    PlayerSpeechPriorityUntilWorldSeconds = FMath::Max(PlayerSpeechPriorityUntilWorldSeconds, Now + Hold);
+
+    UE_LOG(LogLocalTalker, Log,
+        TEXT("%s[Director] PlayerSpeechPriority set center=(%.1f,%.1f,%.1f) radius=%.1f hold=%.2fs until=%.2f"),
+        *LocalTalkerTimePrefixSubsystem(this),
+        PlayerSpeechPriorityCenter.X,
+        PlayerSpeechPriorityCenter.Y,
+        PlayerSpeechPriorityCenter.Z,
+        PlayerSpeechPriorityRadius,
+        HoldSeconds,
+        PlayerSpeechPriorityUntilWorldSeconds);
+}
+
+void ULocalTalkConversationSubsystem::BeginPlayerSpeechFence(const FVector& Location, float Radius, float MaxHoldSeconds)
+{
+    const UWorld* W = GetWorld();
+    const double Now = W ? (double)W->GetTimeSeconds() : 0.0;
+    const double Hold = (double)FMath::Max(0.0f, MaxHoldSeconds);
+    if (Hold <= 0.0)
+    {
+        return;
+    }
+
+    bPlayerSpeechFenceActive = true;
+    PlayerSpeechFenceCenter = Location;
+    PlayerSpeechFenceRadius = FMath::Max(1.0f, Radius);
+    PlayerSpeechFenceUntilWorldSeconds = FMath::Max(PlayerSpeechFenceUntilWorldSeconds, Now + Hold);
+
+    UE_LOG(LogLocalTalker, Log,
+        TEXT("%s[Director] PlayerSpeechFence set center=(%.1f,%.1f,%.1f) radius=%.1f hold=%.2fs until=%.2f"),
+        *LocalTalkerTimePrefixSubsystem(this),
+        PlayerSpeechFenceCenter.X,
+        PlayerSpeechFenceCenter.Y,
+        PlayerSpeechFenceCenter.Z,
+        PlayerSpeechFenceRadius,
+        MaxHoldSeconds,
+        PlayerSpeechFenceUntilWorldSeconds);
+}
+
+void ULocalTalkConversationSubsystem::EndPlayerSpeechFence()
+{
+    if (!bPlayerSpeechFenceActive)
+    {
+        return;
+    }
+
+    bPlayerSpeechFenceActive = false;
+    PlayerSpeechFenceRadius = 0.0f;
+    PlayerSpeechFenceUntilWorldSeconds = 0.0;
+
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] PlayerSpeechFence cleared."), *LocalTalkerTimePrefixSubsystem(this));
+}
+
 void ULocalTalkConversationSubsystem::UpdateContexts()
 {
     UWorld* W = GetWorld();
@@ -283,6 +477,7 @@ void ULocalTalkConversationSubsystem::MaintainKeepAlive()
     for (FLocalConversationContext& Context : ActiveContexts)
     {
         if (Context.Participants.Num() == 0) continue;
+        if (IsContextWithinPlayerPriorityWindow(Context, (double)Now)) continue;
 
         // Allow one prewarm: block if anyone is generating or if more than one participant has pending audio.
         int32 NumGenerating = 0;
@@ -366,7 +561,7 @@ void ULocalTalkConversationSubsystem::MaintainKeepAlive()
 
         // Enforce pacing via the queued turn's earliest-grant time.
         const double Earliest = (double)Now + (double)MinDelay;
-        EnqueueTurn(Candidate, Prompt, Earliest);
+        EnqueueTurn(Candidate, Prompt, Earliest, /*bFromUser*/false);
         Context.LastAutoEnqueueTime = Now;
     }
 }
@@ -434,6 +629,13 @@ void ULocalTalkConversationSubsystem::AddMessageToContext(FLocalConversationCont
 void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationContext& Context, ULocalCharacterComponent* LastSpeaker)
 {
     RefreshContextParticipants(Context);
+    const UWorld* W = GetWorld();
+    const double NowSeconds = W ? (double)W->GetTimeSeconds() : 0.0;
+
+    if (IsContextWithinPlayerPriorityWindow(Context, NowSeconds))
+    {
+        return;
+    }
 
     const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>();
 
@@ -463,6 +665,7 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
     const bool bAllowNpcToNpc = S ? S->bAllowNpcToNpcAuto : false;
     const int32 MaxNpcTurns = S ? S->MaxConsecutiveNpcTurns : 0;
     const float MinDelay = S ? S->MinSecondsBetweenAutoReplies : 0.0f;
+    const float PostPauseMax = FMath::Max(0.0f, S ? S->PostTurnPauseMaxSeconds : 5.0f);
     const bool bRequireListener = S ? S->bRequirePlayerListenerForAuto : false;
     const bool bKeepAlive = S ? S->bKeepConversationAlive : false;
     const bool bIgnoreListener = S ? S->bKeepAliveIgnoresPlayerListenerRequirement : false;
@@ -503,10 +706,11 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
                 UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] -> TRIGGERING RESPONSE from '%s'"),
                     *LocalTalkerTimePrefixSubsystem(this),
                     *Candidate->GetSpeakerNameResolved());
-                // Queue as a normal turn, but delay granting so conversations don't machine-gun between NPCs.
+                // Queue as a normal turn; add random pause so the player has a chance to speak.
                 const double Now = (double)GetWorld()->GetTimeSeconds();
-                const double Earliest = Now + (double)FMath::Max(0.0f, MinDelay);
-                EnqueueTurn(Candidate, Prompt, Earliest);
+                const double RandomPause = (double)FMath::FRandRange(0.0f, PostPauseMax);
+                const double Earliest = Now + (double)FMath::Max(0.0f, MinDelay) + RandomPause;
+                EnqueueTurn(Candidate, Prompt, Earliest, /*bFromUser*/false);
                 bFoundCandidate = true;
                 return;
             }
@@ -536,8 +740,9 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
                         *LocalTalkerTimePrefixSubsystem(this),
                         *LastSpeaker->GetSpeakerNameResolved());
                     const double Now = (double)GetWorld()->GetTimeSeconds();
-                    const double Earliest = Now + (double)FMath::Max(0.0f, MinDelay);
-                    EnqueueTurn(LastSpeaker, Prompt, Earliest);
+                    const double RandomPause = (double)FMath::FRandRange(0.0f, PostPauseMax);
+                    const double Earliest = Now + (double)FMath::Max(0.0f, MinDelay) + RandomPause;
+                    EnqueueTurn(LastSpeaker, Prompt, Earliest, /*bFromUser*/false);
                 }
             }
         }
@@ -586,7 +791,28 @@ void ULocalTalkConversationSubsystem::ProcessTurns()
             continue;
         }
 
-        if (T->IsBusy()) continue;
+        if (!ManualQueue[i].bFromUser && IsTalkerWithinPlayerPriorityWindow(T, Now))
+        {
+            if (Now >= NextPlayerPriorityBlockedLogWorldSeconds)
+            {
+                NextPlayerPriorityBlockedLogWorldSeconds = Now + 1.0;
+                UE_LOG(LogLocalTalker, Log,
+                    TEXT("%s[Director] Deferring NPC turn for '%s' due to active player speech suppression."),
+                    *LocalTalkerTimePrefixSubsystem(this),
+                    *T->GetSpeakerNameResolved());
+            }
+            continue;
+        }
+
+        if (ManualQueue[i].bFromUser && T->IsBusy())
+        {
+            // User turns are highest priority: cut any in-flight generation/audio on the target now.
+            T->Interrupt();
+        }
+        else if (T->IsBusy())
+        {
+            continue;
+        }
 
         FLocalConversationContext* Context = FindOrCreateContext(T);
         if (bRequireListenerAll && Context && !LocalTalkerIsAnyPlayerPawnInHearingRange(GetWorld(), *Context))
@@ -621,7 +847,7 @@ void ULocalTalkConversationSubsystem::ProcessTurns()
             }
         }
 
-        if (!bContextBusy)
+        if (ManualQueue[i].bFromUser || !bContextBusy)
         {
             FString Prompt = ManualQueue[i].Prompt;
             ManualQueue.RemoveAt(i);
@@ -638,6 +864,7 @@ void ULocalTalkConversationSubsystem::ProcessTurns()
 void ULocalTalkConversationSubsystem::InterruptProximity(const FVector& Location, float Radius)
 {
     const float RadiusSq = Radius * Radius;
+    int32 InterruptedCount = 0;
     for (const TWeakObjectPtr<ULocalCharacterComponent>& Weak : Registry)
     {
         ULocalCharacterComponent* T = Weak.Get();
@@ -646,7 +873,42 @@ void ULocalTalkConversationSubsystem::InterruptProximity(const FVector& Location
         if (FVector::DistSquared(T->GetOwner()->GetActorLocation(), Location) <= RadiusSq)
         {
             T->Interrupt();
+            InterruptedCount++;
         }
+    }
+
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] InterruptProximity radius=%.1f interrupted=%d"),
+        *LocalTalkerTimePrefixSubsystem(this),
+        Radius,
+        InterruptedCount);
+}
+
+void ULocalTalkConversationSubsystem::CancelQueuedTurnsInProximity(const FVector& Location, float Radius)
+{
+    const float RadiusSq = Radius * Radius;
+    const int32 Before = ManualQueue.Num();
+    ManualQueue.RemoveAll([Location, RadiusSq](const FQueuedTurn& Q)
+    {
+        ULocalCharacterComponent* T = Q.Talker.Get();
+        if (!T || !T->GetOwner())
+        {
+            return true;
+        }
+        if (Q.bFromUser)
+        {
+            return false;
+        }
+        return FVector::DistSquared(T->GetOwner()->GetActorLocation(), Location) <= RadiusSq;
+    });
+
+    const int32 Removed = Before - ManualQueue.Num();
+    if (Removed > 0)
+    {
+        UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] CancelQueuedTurnsInProximity radius=%.1f removedNpc=%d remaining=%d"),
+            *LocalTalkerTimePrefixSubsystem(this),
+            Radius,
+            Removed,
+            ManualQueue.Num());
     }
 }
 

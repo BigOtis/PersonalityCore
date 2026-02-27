@@ -12,4 +12,5 @@ class FLocalTalkerWav
 {
 public:
     static bool LoadWavPcm16(const FString& Path, FLocalWavPcm16& Out, FString& OutError);
+    static bool SaveWavPcm16(const FString& Path, const FLocalWavPcm16& In, FString& OutError);
 };

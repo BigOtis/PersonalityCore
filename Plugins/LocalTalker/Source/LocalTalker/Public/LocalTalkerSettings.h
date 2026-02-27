@@ -49,6 +49,23 @@ public:
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Kokoro")
     FString KokoroDefaultVoice = TEXT("af_bella");
 
+    // --- Whisper STT settings ---
+    // Whisper model size/name for faster-whisper (e.g. tiny.en, base.en, small.en, medium.en, large-v3-turbo).
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="STT|Whisper")
+    FString WhisperModel = TEXT("base.en");
+
+    // Language hint (ISO code). Empty = auto-detect.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="STT|Whisper")
+    FString WhisperLanguage = TEXT("en");
+
+    // If true, faster-whisper VAD filtering is enabled.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="STT|Whisper")
+    bool bWhisperVadFilter = true;
+
+    // Timeout per STT request (seconds), including model warmup on first request.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="STT|Whisper", meta=(ClampMin="5.0"))
+    float WhisperRequestTimeoutSeconds = 90.0f;
+
     // Bundled/local voice options (used to populate component dropdown).
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Voices")
     TArray<FLocalTalkVoiceOption> Voices;
@@ -86,6 +103,10 @@ public:
     // Optional pacing: the Director won't auto-trigger until at least this much time has passed since the last message.
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Conversation", meta=(ClampMin="0.0"))
     float MinSecondsBetweenAutoReplies = 0.10f;
+
+    // Random pause (0 to this many seconds) after an AI finishes talking before the next speaker is granted a turn. Gives the player a chance to speak.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Conversation", meta=(ClampMin="0.0", ClampMax="30.0"))
+    float PostTurnPauseMaxSeconds = 5.0f;
 
     // Keep conversations alive indefinitely: if a context goes quiet, the Director will auto-trigger
     // a new turn after MaxSilenceSeconds (even if the last message is old).

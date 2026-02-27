@@ -133,6 +133,21 @@ struct FLocalTalkerRuntimePaths
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Kokoro")
     FString KokoroCacheDir;
 
+    // --- Whisper STT runtime ---
+    // Python executable used to launch the Whisper worker.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Whisper")
+    FString WhisperPythonExePath = TEXT("python");
+
+    // Absolute or plugin-relative path to whisper_stt_worker.py.
+    // Leave empty to auto-resolve from Resources/Whisper/ inside the plugin.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Whisper")
+    FString WhisperWorkerScriptPath;
+
+    // Directory used by Whisper/faster-whisper to cache downloaded model files.
+    // Leave empty to use the worker default cache location.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Whisper")
+    FString WhisperCacheDir;
+
     // --- Legacy Piper runtime (deprecated) ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
     FString PiperExePath;

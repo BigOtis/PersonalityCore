@@ -3,7 +3,9 @@ param(
     [string]$ProjectFile = "AutoChat.uproject",
     [string]$Platform = "Win64",
     [string]$Configuration = "Development",
-    [switch]$SkipKill
+    [switch]$SkipKill,
+    [switch]$SkipDeps,
+    [string]$PythonExe = "python"
 )
 
 $ErrorActionPreference = "Stop"
@@ -79,6 +81,26 @@ function Stop-UnrealEditors() {
     }
 }
 
+function Install-PluginDependencies([string]$Root, [string]$PythonCmd) {
+    $reqFiles = @(
+        (Join-Path $Root "Plugins\LocalTalker\Resources\Kokoro\requirements-kokoro-tts.txt"),
+        (Join-Path $Root "Plugins\LocalTalker\Resources\Whisper\requirements-whisper-stt.txt")
+    ) | Where-Object { Test-Path $_ }
+
+    if ($reqFiles.Count -eq 0) {
+        Write-Host "[buildme] No LocalTalker requirements files found. Skipping dependency install."
+        return
+    }
+
+    foreach ($req in $reqFiles) {
+        Write-Host "[buildme] Installing Python dependencies: $req"
+        & $PythonCmd -m pip install -r $req
+        if ($LASTEXITCODE -ne 0) {
+            throw "Dependency install failed for '$req' with exit code $LASTEXITCODE"
+        }
+    }
+}
+
 $uprojectPath = Join-Path $ProjectRoot $ProjectFile
 if (!(Test-Path $uprojectPath)) {
     throw "Project file not found: $uprojectPath"
@@ -105,6 +127,10 @@ Write-Host "[buildme] Target:  $target $Platform $Configuration"
 
 if (-not $SkipKill) {
     Stop-UnrealEditors
+}
+
+if (-not $SkipDeps) {
+    Install-PluginDependencies -Root $ProjectRoot -PythonCmd $PythonExe
 }
 
 & $buildBat $target $Platform $Configuration "-Project=$uprojectPath" -WaitMutex

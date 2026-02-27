@@ -95,11 +95,17 @@ public class LocalTalker : ModuleRules
                 RuntimeDependencies.Add(Path.Combine(VoicesDir, "**"));
             }
 
-            // Stage Qwen worker scripts/config files.
-            string QwenDir = Path.Combine(PluginDir, "Resources", "Qwen");
-            if (Directory.Exists(QwenDir))
+            // Stage runtime worker scripts/config files.
+            string KokoroDir = Path.Combine(PluginDir, "Resources", "Kokoro");
+            if (Directory.Exists(KokoroDir))
             {
-                RuntimeDependencies.Add(Path.Combine(QwenDir, "**"));
+                RuntimeDependencies.Add(Path.Combine(KokoroDir, "**"));
+            }
+
+            string WhisperDir = Path.Combine(PluginDir, "Resources", "Whisper");
+            if (Directory.Exists(WhisperDir))
+            {
+                RuntimeDependencies.Add(Path.Combine(WhisperDir, "**"));
             }
 
         }

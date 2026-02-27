@@ -72,7 +72,7 @@ public:
 
     // --- Turn Management ---
     /** Character wants to say something (e.g. triggered by player interaction). */
-    void RequestTurn(ULocalCharacterComponent* Talker, const FString& Prompt);
+    void RequestTurn(ULocalCharacterComponent* Talker, const FString& Prompt, bool bFromUser = false);
     
     /** Character finished speaking. */
     void ReleaseTurn(ULocalCharacterComponent* Talker);
@@ -95,6 +95,22 @@ public:
     /** Forces everyone near a location to stop talking. */
     void InterruptProximity(const FVector& Location, float Radius);
 
+    /** Removes queued turns for talkers near a location (used to prioritize fresh player input). */
+    void CancelQueuedTurnsInProximity(const FVector& Location, float Radius);
+
+    /**
+     * Marks a temporary "player priority" window around a location.
+     * While active, NPC auto-turns in this area are deferred so player speech can be handled first.
+     */
+    void SetPlayerSpeechPriorityWindow(const FVector& Location, float Radius, float HoldSeconds);
+
+    /**
+     * Hard suppression fence while player speech is being captured/transcribed.
+     * NPC turns in-range are paused until EndPlayerSpeechFence is called (or timeout).
+     */
+    void BeginPlayerSpeechFence(const FVector& Location, float Radius, float MaxHoldSeconds);
+    void EndPlayerSpeechFence();
+
     // --- Queries ---
     TArray<ULocalCharacterComponent*> GetRegisteredTalkers() const;
     bool HasPlayerListenerInRange(const ULocalCharacterComponent* Talker) const;
@@ -110,6 +126,7 @@ private:
     {
         TWeakObjectPtr<ULocalCharacterComponent> Talker;
         FString Prompt;
+        bool bFromUser = false;
         double EarliestGrantWorldSeconds = 0.0;
     };
     TArray<FQueuedTurn> ManualQueue;
@@ -119,11 +136,29 @@ private:
     void MaintainKeepAlive();
     void RefreshContextParticipants(FLocalConversationContext& Context);
 
-    void EnqueueTurn(ULocalCharacterComponent* Talker, const FString& Prompt, double EarliestGrantWorldSeconds);
+    void EnqueueTurn(ULocalCharacterComponent* Talker, const FString& Prompt, double EarliestGrantWorldSeconds, bool bFromUser);
     
     FLocalConversationContext* FindOrCreateContext(ULocalCharacterComponent* Agent);
     void AddMessageToContext(FLocalConversationContext& Context, const FString& Speaker, const FString& Text, bool bFromUser);
+
+    bool IsPlayerSpeechPriorityActive(double NowWorldSeconds) const;
+    bool IsPlayerSpeechFenceActive(double NowWorldSeconds) const;
+    bool IsTalkerWithinPlayerSpeechFence(const ULocalCharacterComponent* Talker, double NowWorldSeconds) const;
+    bool IsContextWithinPlayerSpeechFence(const FLocalConversationContext& Context, double NowWorldSeconds) const;
+    bool IsTalkerWithinPlayerPriorityWindow(const ULocalCharacterComponent* Talker, double NowWorldSeconds) const;
+    bool IsContextWithinPlayerPriorityWindow(const FLocalConversationContext& Context, double NowWorldSeconds) const;
     
     // Logic to decide who should respond next in a context
     void EvaluateNextSpeaker(FLocalConversationContext& Context, ULocalCharacterComponent* LastSpeaker);
+
+    bool bPlayerSpeechPriorityActive = false;
+    FVector PlayerSpeechPriorityCenter = FVector::ZeroVector;
+    float PlayerSpeechPriorityRadius = 0.0f;
+    double PlayerSpeechPriorityUntilWorldSeconds = 0.0;
+    double NextPlayerPriorityBlockedLogWorldSeconds = 0.0;
+
+    bool bPlayerSpeechFenceActive = false;
+    FVector PlayerSpeechFenceCenter = FVector::ZeroVector;
+    float PlayerSpeechFenceRadius = 0.0f;
+    double PlayerSpeechFenceUntilWorldSeconds = 0.0;
 };

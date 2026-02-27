@@ -1169,7 +1169,14 @@ static FString LocalTalkerBuildLlama3PromptFromContext(
         P += Content;
         P += TEXT("<|eot_id|>");
     };
-    (void)TurnPrompt;
+
+    const FString TurnPromptClean = LocalTalkerOneLine(TurnPrompt);
+    const bool bExplicitUserTurn =
+        !TurnPromptClean.IsEmpty() &&
+        !TurnPromptClean.StartsWith(TEXT("RAW:"), ESearchCase::IgnoreCase) &&
+        !TurnPromptClean.StartsWith(TEXT("Respond to "), ESearchCase::IgnoreCase) &&
+        !TurnPromptClean.StartsWith(TEXT("Director instruction:"), ESearchCase::IgnoreCase) &&
+        !TurnPromptClean.StartsWith(TEXT("Instruction:"), ESearchCase::IgnoreCase);
 
     const FString SelfTag = LocalTalkerTagForName(SelfSpeakerName);
 
@@ -1219,6 +1226,26 @@ static FString LocalTalkerBuildLlama3PromptFromContext(
             BudgetUsed -= 8;
             StartIdx++;
         }
+    }
+
+    // Keep track of the latest user utterance so player intent is always visible to the model.
+    int32 LatestUserIdx = INDEX_NONE;
+    FString LatestUserClean;
+    for (int32 i = ContextHistory.Num() - 1; i >= 0; --i)
+    {
+        const FLocalTalkMessage& M = ContextHistory[i];
+        if (!M.bFromUser)
+        {
+            continue;
+        }
+        const FString Clean = LocalTalkerOneLine(M.Content);
+        if (Clean.IsEmpty() || LocalTalkerIsMetaLine(Clean))
+        {
+            continue;
+        }
+        LatestUserIdx = i;
+        LatestUserClean = Clean;
+        break;
     }
 
     TArray<FString> Others;
@@ -1322,11 +1349,11 @@ static FString LocalTalkerBuildLlama3PromptFromContext(
     FString Transcript;
     Transcript += TEXT("[TRANSCRIPT]\n");
     bool bHasHistory = false;
+    bool bIncludedLatestUser = false;
     FString LastLine;
     for (int32 i = StartIdx; i < ContextHistory.Num(); i++)
     {
         const FLocalTalkMessage& M = ContextHistory[i];
-        if (M.bFromUser) continue;
         const FString Clean = LocalTalkerOneLine(M.Content);
         if (Clean.IsEmpty()) continue;
         if (LocalTalkerIsMetaLine(Clean)) continue;
@@ -1340,6 +1367,20 @@ static FString LocalTalkerBuildLlama3PromptFromContext(
         Transcript += Line + TEXT("\n");
         LastLine = Line;
         bHasHistory = true;
+        if (M.bFromUser && i == LatestUserIdx)
+        {
+            bIncludedLatestUser = true;
+        }
+    }
+
+    if (LatestUserIdx != INDEX_NONE && !bIncludedLatestUser && !LatestUserClean.IsEmpty())
+    {
+        const FString PlayerLine = FString::Printf(TEXT("[PLAYER] %s [/PLAYER]"), *LatestUserClean);
+        if (!PlayerLine.Equals(LastLine, ESearchCase::IgnoreCase))
+        {
+            Transcript += PlayerLine + TEXT("\n");
+            bHasHistory = true;
+        }
     }
     Transcript += TEXT("[/TRANSCRIPT]\n\n");
 
@@ -1354,6 +1395,19 @@ static FString LocalTalkerBuildLlama3PromptFromContext(
         UserBlock += TEXT("[/TRANSCRIPT]\n\n");
         UserBlock += FString::Printf(TEXT("No transcript yet. You just ran into %s nearby.\n"), *Encounter);
         UserBlock += TEXT("Say a brief greeting to start the conversation.\n\n");
+    }
+
+    if (bExplicitUserTurn)
+    {
+        UserBlock += TEXT("Current player message to answer now:\n");
+        UserBlock += FString::Printf(TEXT("[PLAYER] %s [/PLAYER]\n"), *TurnPromptClean);
+        UserBlock += TEXT("You MUST directly address this message in your first sentence.\n\n");
+    }
+    else if (!LatestUserClean.IsEmpty())
+    {
+        UserBlock += TEXT("Latest player message:\n");
+        UserBlock += FString::Printf(TEXT("[PLAYER] %s [/PLAYER]\n"), *LatestUserClean);
+        UserBlock += TEXT("If relevant, naturally acknowledge this in your next reply.\n\n");
     }
 
     UserBlock += TEXT("Next speaker must be [");
@@ -1445,6 +1499,9 @@ FLocalTalkerRuntimePaths ULocalCharacterComponent::ResolvePaths() const
     if (!PathsOverride.KokoroPythonExePath.IsEmpty()) Out.KokoroPythonExePath = PathsOverride.KokoroPythonExePath;
     if (!PathsOverride.KokoroWorkerScriptPath.IsEmpty()) Out.KokoroWorkerScriptPath = PathsOverride.KokoroWorkerScriptPath;
     if (!PathsOverride.KokoroCacheDir.IsEmpty()) Out.KokoroCacheDir = PathsOverride.KokoroCacheDir;
+    if (!PathsOverride.WhisperPythonExePath.IsEmpty()) Out.WhisperPythonExePath = PathsOverride.WhisperPythonExePath;
+    if (!PathsOverride.WhisperWorkerScriptPath.IsEmpty()) Out.WhisperWorkerScriptPath = PathsOverride.WhisperWorkerScriptPath;
+    if (!PathsOverride.WhisperCacheDir.IsEmpty()) Out.WhisperCacheDir = PathsOverride.WhisperCacheDir;
     if (!PathsOverride.PiperExePath.IsEmpty()) Out.PiperExePath = PathsOverride.PiperExePath;
     if (!PathsOverride.PiperVoiceModelPath.IsEmpty()) Out.PiperVoiceModelPath = PathsOverride.PiperVoiceModelPath;
     if (!PathsOverride.WorkingDir.IsEmpty()) Out.WorkingDir = PathsOverride.WorkingDir;
@@ -1497,6 +1554,16 @@ FLocalTalkerRuntimePaths ULocalCharacterComponent::ResolvePaths() const
         {
             Out.KokoroPythonExePath = TEXT("python");
         }
+
+        if (Out.WhisperWorkerScriptPath.IsEmpty())
+        {
+            Out.WhisperWorkerScriptPath = FPaths::Combine(Base, TEXT("Resources/Whisper/whisper_stt_worker.py"));
+        }
+
+        if (Out.WhisperPythonExePath.IsEmpty())
+        {
+            Out.WhisperPythonExePath = TEXT("python");
+        }
     }
 
     return Out;
@@ -1541,6 +1608,7 @@ void ULocalCharacterComponent::Interrupt()
     bInterrupted = true;
     bLLMFinished = true;
     bAudioPlaybackComplete = true;
+    bSpokeThisTurn = false;
 
     if (ActiveLLM)
     {
@@ -1698,6 +1766,28 @@ void ULocalCharacterComponent::InternalGrantTurn(const FString& PromptOrText)
         {
             ContextHistory = Sub->GetContextHistory(this);
             Participants = Sub->GetContextParticipants(this);
+            int32 UserMsgs = 0;
+            FString LastUserPreview;
+            for (int32 i = ContextHistory.Num() - 1; i >= 0; --i)
+            {
+                if (!ContextHistory[i].bFromUser)
+                {
+                    continue;
+                }
+                UserMsgs++;
+                if (LastUserPreview.IsEmpty())
+                {
+                    LastUserPreview = LocalTalkerPreview(LocalTalkerOneLine(ContextHistory[i].Content));
+                }
+            }
+            UE_LOG(LogLocalTalker, Log,
+                TEXT("%s[%s] Building LLM prompt with history=%d participants=%d userMsgs=%d lastUser=\"%s\""),
+                *LocalTalkerTimePrefix(this),
+                *GetSpeakerNameResolved(),
+                ContextHistory.Num(),
+                Participants.Num(),
+                UserMsgs,
+                LastUserPreview.IsEmpty() ? TEXT("<none>") : *LastUserPreview);
             if (LocalTalkerModelLooksLikeLlama3(Paths.LlamaModelPath))
             {
                 PromptText = LocalTalkerBuildLlama3PromptFromContext(
@@ -1771,6 +1861,13 @@ void ULocalCharacterComponent::OnHeardSpeech(const FString& InSpeakerName, const
 
 void ULocalCharacterComponent::HandleLLMError(const FString& Error)
 {
+    if (bInterrupted)
+    {
+        UE_LOG(LogLocalTalker, Verbose, TEXT("%s[%s] LLM canceled after interrupt: %s"), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved(), *Error);
+        bLLMFinished = true;
+        return;
+    }
+
     UE_LOG(LogLocalTalker, Error, TEXT("%s[%s] LLM error: %s"), *LocalTalkerTimePrefix(this), *GetSpeakerNameResolved(), *Error);
     if (bDebugPrintGeneratedText)
     {
@@ -2019,6 +2116,16 @@ public:
 
             // Mark this sentence as fully processed (either produced audio or errored).
             Owner->PendingSentenceCount.Decrement();
+            const int32 PendingNow = Owner->PendingSentenceCount.GetValue();
+            if (PendingNow < 0)
+            {
+                // Can happen if an interrupt/reset cleared pending count while a worker task was in flight.
+                Owner->PendingSentenceCount.Reset();
+                UE_LOG(LogLocalTalker, Warning, TEXT("%s[%s] Pending sentence counter underflow corrected (%d -> 0)."),
+                    *LocalTalkerTimePrefix(Owner),
+                    *Owner->GetSpeakerNameResolved(),
+                    PendingNow);
+            }
             if (LocalTalkerShouldLogAudioTrace())
             {
                 UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] TTS worker completed sentence (pending now=%d)."),

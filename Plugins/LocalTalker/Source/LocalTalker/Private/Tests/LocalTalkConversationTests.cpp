@@ -188,7 +188,7 @@ bool FLocalTalkConversationPlayerInputReactionTest::RunTest(const FString& Param
     }
 
     const FString PlayerPrompt = TEXT("What should we do before entering the cave?");
-    Sub->RequestTurn(Alice, PlayerPrompt);
+    Sub->RequestTurn(Alice, PlayerPrompt, /*bFromUser*/true);
 
     TArray<FLocalTalkMessage> History = Sub->GetContextHistory(Alice);
     TestEqual(TEXT("RequestTurn should record user input immediately."), History.Num(), 1);
