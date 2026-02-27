@@ -7,6 +7,7 @@
 class UButton;
 class UComboBoxString;
 class UTextBlock;
+class UBorder;
 class UAutoChatVoiceInputComponent;
 
 /**
@@ -41,9 +42,29 @@ private:
     UPROPERTY(Transient)
     TObjectPtr<UTextBlock> StatusText = nullptr;
 
+    UPROPERTY(Transient)
+    TObjectPtr<UTextBlock> CurrentMicText = nullptr;
+
+    UPROPERTY(Transient)
+    TObjectPtr<UBorder> VoiceActivityIndicator = nullptr;
+
+    // Timer used to fade the voice indicator back to idle after activity.
+    FTimerHandle VoiceIndicatorTimer;
+
     UFUNCTION()
     void HandleApplyClicked();
 
     void SetStatus(const FString& Message);
+
+    void UpdateCurrentMicLabel();
+
+public:
+    /** Called by the voice input component when voice input is detected. */
+    UFUNCTION()
+    void NotifyVoiceActivity();
+
+private:
+    UFUNCTION()
+    void ResetVoiceIndicator();
 };
 

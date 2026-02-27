@@ -62,8 +62,8 @@ function Resolve-EngineRoot([string]$EngineAssociation) {
 
 function Stop-UnrealEditors() {
     $names = @("UnrealEditor", "UE5Editor", "UE4Editor", "UnrealEditor-Cmd")
-    $procs = Get-Process -Name $names -ErrorAction SilentlyContinue
-    if ($null -eq $procs -or $procs.Count -eq 0) {
+    $procs = @(Get-Process -Name $names -ErrorAction SilentlyContinue)
+    if ($procs.Count -eq 0) {
         Write-Host "[buildme] No running Unreal editor process found."
         return
     }

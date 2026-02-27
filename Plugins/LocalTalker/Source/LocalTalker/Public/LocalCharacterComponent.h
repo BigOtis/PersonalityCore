@@ -14,7 +14,6 @@
 
 class ULocalTalkerInProcGenerateAsync;
 class FLocalTalkerTTSWorker;
-struct FLocalQwenWorkerState;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FLocalCharacterSpokenEvent, const FString&, Text);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FLocalCharacterErrorEvent, const FString&, Error);
@@ -33,7 +32,7 @@ class LOCALTALKER_API ULocalCharacterComponent : public UActorComponent
 public:
     ULocalCharacterComponent();
     virtual ~ULocalCharacterComponent() override;
-    static void ShutdownSharedQwenWorkerGlobal();
+    static void ShutdownSharedTtsWorkerGlobal();
 
     // --- Configuration ---
     UPROPERTY(EditAnywhere, Category="LocalTalker")
@@ -261,6 +260,10 @@ private:
     double ActiveAudioStartWorldSeconds = 0.0;
     float ActiveAudioDurationSeconds = 0.0f;
 
+    // Tracks whether this speaker is queued behind another (event-driven, not polled).
+    bool bWaitingForOtherSpeaker = false;
+    double BlockedSinceSeconds = 0.0;
+
     void EnsureAudio();
     void StartTTSWorker(const FLocalTalkerRuntimePaths& Paths);
     void StopTTSWorker();
@@ -272,7 +275,6 @@ private:
     FString BuildPromptWithHistory(const FLocalTalkerCharacterConfig& Config, const FString& UserText) const;
     void EmitSubtitle(const FString& Text, float DurationSeconds);
     void DebugPrintLine(const FString& Line, float Seconds, bool bNewLine) const;
-    bool ResolveQwenVoiceSelection(FString& OutSpeaker, FString& OutVoicePromptPath, FString& OutInstruction) const;
     bool ShouldAllowTalk() const;
     UFUNCTION()
     void HandleAudioFinished();
@@ -282,14 +284,12 @@ private:
     UFUNCTION() void HandleLLMDelta(const FString& Text);
     UFUNCTION() void HandleLLMCompleted(const FString& Text);
 
-    void RunQwenSentenceToAudio(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, FString& OutErr);
-    bool GenerateQwenAudioBytes(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, TArray<uint8>& OutBytes, int32& OutSampleRate, int32& OutNumChannels, FString& OutErr);
-    bool EnsureQwenWorker(const FLocalTalkerRuntimePaths& Paths, FString& OutErr);
-    bool SendQwenWorkerRequest(const FString& RequestLine, FString& OutResponseLine, FString& OutErr, double TimeoutSeconds);
-    void ShutdownQwenWorker();
-    void KickoffQwenPrewarmIfNeeded(const FLocalTalkerRuntimePaths& Paths);
+    // Kokoro ONNX TTS (CPU backend)
+    void RunKokoroSentenceToAudio(const FString& Sentence, const FLocalTalkerRuntimePaths& Paths, FString& OutErr);
+    bool EnsureKokoroWorker(const FLocalTalkerRuntimePaths& Paths, FString& OutErr);
+    bool ResolveKokoroVoiceSelection(FString& OutVoice) const;
+    void ShutdownKokoroWorker();
 
-    FLocalQwenWorkerState* QwenWorker = nullptr;
     FLocalTalkerRuntimePaths ResolvePaths() const;
     FLocalTalkerCharacterConfig ResolveConfig() const;
 };

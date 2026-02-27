@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Qwen TTS performance benchmark for LocalTalker.
 
@@ -321,6 +321,7 @@ def main() -> int:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--flash-attn", action="store_true", help="Enable flash_attention_2 load path.")
+    parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile in worker.")
     parser.add_argument("--cache-size", type=int, default=64, help="Worker in-memory synth cache size.")
     parser.add_argument("--speaker", default="vivian")
     parser.add_argument("--language", default="Auto")
@@ -380,6 +381,7 @@ def main() -> int:
         "--cache-size", str(max(0, int(args.cache_size))),
     ]
     cmd.append("--flash-attn" if args.flash_attn else "--no-flash-attn")
+    cmd.append("--no-compile" if args.no_compile else "--compile")
 
     request_timeout = max(10.0, float(args.request_timeout))
 

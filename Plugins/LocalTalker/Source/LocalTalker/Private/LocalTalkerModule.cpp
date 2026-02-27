@@ -39,7 +39,7 @@ namespace
 		bool bSavedSettings = false;
 		bool bSavedRequireAllTalk = false;
 		bool bSavedRequireAuto = false;
-		ELocalTalkTtsBackend SavedTtsBackend = ELocalTalkTtsBackend::QwenWorker;
+		ELocalTalkTtsBackend SavedTtsBackend = ELocalTalkTtsBackend::KokoroWorker;
 
 		FTSTicker::FDelegateHandle TickHandle;
 
@@ -75,7 +75,7 @@ namespace
 
 				S->bRequirePlayerListenerForAllTalk = false;
 				S->bRequirePlayerListenerForAuto = false;
-				S->TtsBackend = ELocalTalkTtsBackend::QwenWorker;
+				S->TtsBackend = ELocalTalkTtsBackend::KokoroWorker;
 			}
 		}
 
@@ -388,7 +388,7 @@ namespace
 		TEXT("Notes:\n")
 		TEXT("- Default audio=0 for backwards compatibility.\n")
 		TEXT("- Requires Project Settings -> LocalTalker DefaultPaths LlamaLibPath + LlamaModelPath to be set.\n")
-		TEXT("- Qwen worker/model paths can be set in Project Settings -> LocalTalker -> DefaultPaths."),
+		TEXT("- Kokoro TTS runs CPU-only via ONNX; no extra paths needed."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&LocalTalker_RunITestLLM)
 	);
 
@@ -401,7 +401,7 @@ namespace
 		TEXT("Notes:\n")
 		TEXT("- Default audio=1. Success requires sentence + audio start + audio completion for both speakers.\n")
 		TEXT("- Requires Project Settings -> LocalTalker DefaultPaths LlamaLibPath + LlamaModelPath to be set.\n")
-		TEXT("- Qwen worker/model paths can be set in Project Settings -> LocalTalker -> DefaultPaths."),
+		TEXT("- Kokoro TTS runs CPU-only via ONNX; no extra paths needed."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&LocalTalker_RunITestE2E)
 	);
 }
@@ -417,7 +417,7 @@ public:
     {
         // Ensure we release llama.cpp resources on shutdown (editor/game exit).
         FLocalTalkerLlamaCache::Get().Shutdown();
-        ULocalCharacterComponent::ShutdownSharedQwenWorkerGlobal();
+        ULocalCharacterComponent::ShutdownSharedTtsWorkerGlobal();
 
 		// Ensure runner is cleaned up if hot-reloading/module shutdown occurs.
 		if (GLLMRunner.IsValid())

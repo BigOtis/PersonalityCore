@@ -2,12 +2,17 @@
 
 #include "AutoChatVoiceInputComponent.h"
 
+#include "Components/Border.h"
 #include "Components/Button.h"
 #include "Components/ComboBoxString.h"
+#include "Components/HorizontalBox.h"
+#include "Components/HorizontalBoxSlot.h"
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
 #include "Blueprint/WidgetTree.h"
+#include "Engine/World.h"
+#include "TimerManager.h"
 
 TSharedRef<SWidget> UAutoChatMicSelectorWidget::RebuildWidget()
 {
@@ -19,8 +24,25 @@ TSharedRef<SWidget> UAutoChatMicSelectorWidget::RebuildWidget()
     UVerticalBox* RootBox = WidgetTree->ConstructWidget<UVerticalBox>(UVerticalBox::StaticClass(), TEXT("RootVBox"));
     WidgetTree->RootWidget = RootBox;
 
+    // Row: voice activity indicator + current mic name.
+    UHorizontalBox* HeaderRow = WidgetTree->ConstructWidget<UHorizontalBox>(UHorizontalBox::StaticClass(), TEXT("HeaderRow"));
+    RootBox->AddChildToVerticalBox(HeaderRow);
+
+    VoiceActivityIndicator = WidgetTree->ConstructWidget<UBorder>(UBorder::StaticClass(), TEXT("VoiceActivityIndicator"));
+    VoiceActivityIndicator->SetBrushColor(FLinearColor::Gray);
+    VoiceActivityIndicator->SetPadding(FMargin(4.0f));
+    if (UHorizontalBoxSlot* IndicatorSlot = HeaderRow->AddChildToHorizontalBox(VoiceActivityIndicator))
+    {
+        IndicatorSlot->SetPadding(FMargin(0.0f, 0.0f, 8.0f, 0.0f));
+    }
+
+    CurrentMicText = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("CurrentMicText"));
+    CurrentMicText->SetText(FText::FromString(TEXT("Mic: <Default>")));
+    HeaderRow->AddChildToHorizontalBox(CurrentMicText);
+
+    // Label + combo for mic selection.
     UTextBlock* Label = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), TEXT("MicLabel"));
-    Label->SetText(FText::FromString(TEXT("Microphone")));
+    Label->SetText(FText::FromString(TEXT("Select Microphone")));
     RootBox->AddChildToVerticalBox(Label);
 
     MicCombo = WidgetTree->ConstructWidget<UComboBoxString>(UComboBoxString::StaticClass(), TEXT("MicCombo"));
@@ -51,6 +73,7 @@ void UAutoChatMicSelectorWidget::NativeConstruct()
     }
 
     RefreshMicrophoneList();
+    UpdateCurrentMicLabel();
 }
 
 void UAutoChatMicSelectorWidget::RefreshMicrophoneList()
@@ -88,6 +111,8 @@ void UAutoChatMicSelectorWidget::RefreshMicrophoneList()
     {
         MicCombo->SetSelectedOption(TEXT("Default (System)"));
     }
+
+    UpdateCurrentMicLabel();
 }
 
 void UAutoChatMicSelectorWidget::HandleApplyClicked()
@@ -115,6 +140,56 @@ void UAutoChatMicSelectorWidget::SetStatus(const FString& Message)
     if (StatusText)
     {
         StatusText->SetText(FText::FromString(Message));
+    }
+}
+
+void UAutoChatMicSelectorWidget::UpdateCurrentMicLabel()
+{
+    if (!CurrentMicText)
+    {
+        return;
+    }
+
+    FString Label = TEXT("Mic: <None>");
+    if (VoiceInputComponent)
+    {
+        if (VoiceInputComponent->MicInputDeviceMode == ELocalTalkMicInputDeviceMode::NamedDevice &&
+            !VoiceInputComponent->MicInputDeviceName.IsEmpty())
+        {
+            Label = FString::Printf(TEXT("Mic: %s"), *VoiceInputComponent->MicInputDeviceName);
+        }
+        else
+        {
+            Label = TEXT("Mic: Default (System)");
+        }
+    }
+
+    CurrentMicText->SetText(FText::FromString(Label));
+}
+
+void UAutoChatMicSelectorWidget::NotifyVoiceActivity()
+{
+    if (VoiceActivityIndicator)
+    {
+        VoiceActivityIndicator->SetBrushColor(FLinearColor::Green);
+    }
+    if (UWorld* World = GetWorld())
+    {
+        World->GetTimerManager().ClearTimer(VoiceIndicatorTimer);
+        World->GetTimerManager().SetTimer(
+            VoiceIndicatorTimer,
+            this,
+            &UAutoChatMicSelectorWidget::ResetVoiceIndicator,
+            0.25f,
+            false);
+    }
+}
+
+void UAutoChatMicSelectorWidget::ResetVoiceIndicator()
+{
+    if (VoiceActivityIndicator)
+    {
+        VoiceActivityIndicator->SetBrushColor(FLinearColor::Gray);
     }
 }
 

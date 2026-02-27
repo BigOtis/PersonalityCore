@@ -1,4 +1,4 @@
-﻿#include "LocalTalkConversationSubsystem.h"
+#include "LocalTalkConversationSubsystem.h"
 #include "LocalCharacterComponent.h"
 #include "LocalTalkerSettings.h"
 #include "LocalTalkerLog.h"
@@ -412,7 +412,13 @@ void ULocalTalkConversationSubsystem::AddMessageToContext(FLocalConversationCont
     }
 
     Context.History.Add({ Speaker, Text, bFromUser });
-    if (Context.History.Num() > 10) Context.History.RemoveAt(0);
+    // Keep a slightly longer rolling window of messages so the LLM can
+    // see more prior turns when building prompts.
+    const int32 MaxHistoryMessages = 16;
+    if (Context.History.Num() > MaxHistoryMessages)
+    {
+        Context.History.RemoveAt(0);
+    }
     Context.LastInteractionTime = GetWorld()->GetTimeSeconds();
 
     if (bFromUser)

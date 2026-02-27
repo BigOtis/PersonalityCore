@@ -25,33 +25,29 @@ public:
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Defaults")
     FLocalTalkerCharacterConfig DefaultCharacterConfig;
 
-    // Active TTS backend. Defaults to Qwen worker process.
+    // Active TTS backend.
+    // KokoroWorker = CPU-only ONNX, no GPU required, auto-downloads ~380 MB model on first run.
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS")
-    ELocalTalkTtsBackend TtsBackend = ELocalTalkTtsBackend::QwenWorker;
+    ELocalTalkTtsBackend TtsBackend = ELocalTalkTtsBackend::KokoroWorker;
 
-    // Whether the Qwen worker should request FlashAttention-2.
-    // Disable if your environment does not support it.
-    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Qwen")
-    bool bQwenUseFlashAttention = false;
+    // --- Kokoro ONNX settings ---
 
-    // Number of shared Qwen worker processes kept alive for parallel synthesis.
-    // Use >1 to allow overlapping requests from multiple speakers.
-    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Qwen", meta=(ClampMin="1", ClampMax="8"))
-    int32 QwenWorkerPoolSize = 1;
+    // Number of parallel Kokoro worker processes (1 is sufficient for real-time CPU synthesis).
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Kokoro", meta=(ClampMin="1", ClampMax="4"))
+    int32 KokoroWorkerPoolSize = 1;
 
-    // Timeout per TTS request (seconds) when waiting for Qwen worker response.
-    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Qwen", meta=(ClampMin="1.0"))
-    float QwenRequestTimeoutSeconds = 180.0f;
+    // Timeout per Kokoro TTS request (seconds). Kokoro is fast on CPU; 30s is generous.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Kokoro", meta=(ClampMin="5.0"))
+    float KokoroRequestTimeoutSeconds = 60.0f;
 
-    // Max cap for Qwen decoder steps per synthesis request.
-    // Runtime applies an additional sentence-length adaptive cap for latency stability.
-    // Set to 0 to rely only on adaptive cap.
-    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Qwen", meta=(ClampMin="0"))
-    int32 QwenMaxNewTokens = 1536;
+    // Global speech speed multiplier. 1.0 = normal, 1.2 = 20% faster.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Kokoro", meta=(ClampMin="0.5", ClampMax="2.0"))
+    float KokoroSpeed = 1.0f;
 
-    // Use sampling for Qwen synthesis. Disabling sampling is typically faster and more deterministic.
-    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Qwen")
-    bool bQwenDoSample = false;
+    // Fallback Kokoro voice used when a character has no KokoroVoice configured.
+    // Available voices: af_bella, af_nova, af_sarah, am_adam, am_michael, am_eric, bm_george, etc.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="TTS|Kokoro")
+    FString KokoroDefaultVoice = TEXT("af_bella");
 
     // Bundled/local voice options (used to populate component dropdown).
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Voices")

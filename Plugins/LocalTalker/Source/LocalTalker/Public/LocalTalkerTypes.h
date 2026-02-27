@@ -22,8 +22,8 @@ enum class ELocalTalkMicInputDeviceMode : uint8
 UENUM(BlueprintType)
 enum class ELocalTalkTtsBackend : uint8
 {
-    QwenWorker UMETA(DisplayName="Qwen3-TTS Worker"),
-    PiperLegacy UMETA(DisplayName="Piper (Legacy, Deprecated)")
+    KokoroWorker UMETA(DisplayName="Kokoro ONNX (CPU, Recommended)"),
+    PiperLegacy  UMETA(DisplayName="Piper (Legacy, Deprecated)")
 };
 
 USTRUCT(BlueprintType)
@@ -118,36 +118,20 @@ struct FLocalTalkerRuntimePaths
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
     FString LlamaLibPath;
 
-    // --- Qwen3-TTS runtime ---
-    // Python executable used to launch the bundled worker script.
-    // Examples: "python", "python3", "C:/Python312/python.exe"
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Qwen")
-    FString QwenPythonExePath = TEXT("python");
+    // --- Kokoro ONNX runtime ---
+    // Python executable used to launch the Kokoro worker.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Kokoro")
+    FString KokoroPythonExePath = TEXT("python");
 
-    // Absolute or plugin-relative path to qwen_tts_worker.py.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Qwen")
-    FString QwenWorkerScriptPath;
+    // Absolute or plugin-relative path to kokoro_tts_worker.py.
+    // Leave empty to auto-resolve from Resources/Kokoro/ inside the plugin.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Kokoro")
+    FString KokoroWorkerScriptPath;
 
-    // HuggingFace repo id or local model folder.
-    // Example: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Qwen")
-    FString QwenModelPath = TEXT("Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice");
-
-    // Optional HuggingFace repo id or local tokenizer folder.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Qwen")
-    FString QwenTokenizerPath = TEXT("Qwen/Qwen3-TTS-Tokenizer-12Hz");
-
-    // Example: "cuda:0", "cuda", "cpu"
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Qwen")
-    FString QwenDevice = TEXT("cuda:0");
-
-    // One of: "bfloat16", "float16", "float32"
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Qwen")
-    FString QwenDType = TEXT("bfloat16");
-
-    // Default language passed to Qwen generation APIs, usually "Auto".
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Qwen")
-    FString QwenLanguage = TEXT("English");
+    // Directory to cache downloaded Kokoro model files.
+    // Leave empty to use %LOCALAPPDATA%\LocalTalker\Kokoro (Windows) or ~/.cache/localtalker/kokoro.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Kokoro")
+    FString KokoroCacheDir;
 
     // --- Legacy Piper runtime (deprecated) ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
@@ -169,18 +153,10 @@ struct FLocalTalkVoiceOption
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Voices")
     FName Id = NAME_None;
 
-    // Qwen CustomVoice speaker name (as recognized by the loaded model).
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Voices|Qwen")
-    FString QwenSpeaker;
-
-    // Optional generation instruction to shape delivery/emotion.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Voices|Qwen")
-    FString QwenInstruction;
-
-    // Optional externally-generated voice prompt file path for Base model voice clone inference.
-    // The plugin does not create these prompts; users generate them offline and include them.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Voices|Qwen")
-    FString QwenVoicePromptPath;
+    // Kokoro ONNX voice name (e.g. "af_bella", "am_michael").
+    // See https://huggingface.co/hexgrad/Kokoro-82M for full list.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Voices|Kokoro")
+    FString KokoroVoice;
 
     // Legacy Piper fields kept for backward compatibility.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Voices")

@@ -3,6 +3,8 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "LocalTalkerTypes.h"
+#include "HAL/ThreadSafeBool.h"
+#include "AudioCaptureCore.h"
 #include "AutoChatVoiceInputComponent.generated.h"
 
 class ULocalCharacterComponent;
@@ -47,6 +49,18 @@ public:
     /** Optional widget class to display a simple microphone selector UI. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|UI")
     TSubclassOf<UUserWidget> MicSelectorWidgetClass;
+
+    /** If true, show on-screen subtitles for the player's recognized speech. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Subtitles")
+    bool bShowPlayerSubtitles = true;
+
+    /** Display name used as the speaker label for player subtitles (e.g., "You"). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Subtitles")
+    FString PlayerSubtitleSpeakerName;
+
+    /** Heuristic seconds-per-character used to estimate how long to display player subtitles. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Subtitles", meta=(ClampMin="0.01"))
+    float PlayerSubtitleSecondsPerChar = 0.06f;
 
     UPROPERTY(BlueprintAssignable, Category="AutoChat|Voice")
     FAutoChatVoiceSubmittedEvent OnTranscriptSubmitted;
@@ -94,8 +108,24 @@ public:
     void HideMicSelectorUI();
 
 private:
+    virtual void BeginPlay() override;
+    virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
     void ApplyMicSelectionToAI(ULocalCharacterComponent* AI) const;
+
+    void ShowPlayerSubtitle(const FString& Transcript, int32 NumTargets);
 
     UPROPERTY(Transient)
     TObjectPtr<UUserWidget> ActiveMicSelectorWidget = nullptr;
+
+    // Lightweight mic level debugger: opens an AudioCapture stream and pings
+    // the mic widget when non-silent audio is observed. This is purely for
+    // visualization / confirmation that the selected device is delivering audio.
+    Audio::FAudioCapture MicCapture;
+    FThreadSafeBool bMicCaptureActive = false;
+
+    void StartMicCapture();
+    void StopMicCapture();
+
+    void OnAudioCapture(const float* AudioData, int32 NumFrames, int32 NumChannels, double StreamTime, bool bOverflow);
 };
