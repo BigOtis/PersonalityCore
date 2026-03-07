@@ -49,6 +49,177 @@ static bool LocalTalkerIsAnyPlayerPawnInHearingRange(const UWorld* World, const 
     return false;
 }
 
+static FString LocalTalkerOneLineSubsystem(const FString& In)
+{
+    FString S = In;
+    S.ReplaceInline(TEXT("\r"), TEXT(" "));
+    S.ReplaceInline(TEXT("\n"), TEXT(" "));
+    S.ReplaceInline(TEXT("\t"), TEXT(" "));
+    while (S.Contains(TEXT("  ")))
+    {
+        S.ReplaceInline(TEXT("  "), TEXT(" "));
+    }
+    S.TrimStartAndEndInline();
+    return S;
+}
+
+static FString LocalTalkerNormalizeForLoopCompare(const FString& In)
+{
+    const FString One = LocalTalkerOneLineSubsystem(In).ToLower();
+    FString Out;
+    Out.Reserve(One.Len());
+    bool bPrevSpace = false;
+    for (int32 i = 0; i < One.Len(); ++i)
+    {
+        const TCHAR C = One[i];
+        if (FChar::IsAlnum(C))
+        {
+            Out.AppendChar(C);
+            bPrevSpace = false;
+        }
+        else if (!bPrevSpace)
+        {
+            Out.AppendChar(TEXT(' '));
+            bPrevSpace = true;
+        }
+    }
+    Out.TrimStartAndEndInline();
+    return Out;
+}
+
+static bool LocalTalkerLikelySameUtterance(const FString& AIn, const FString& BIn)
+{
+    const FString A = LocalTalkerNormalizeForLoopCompare(AIn);
+    const FString B = LocalTalkerNormalizeForLoopCompare(BIn);
+    if (A.IsEmpty() || B.IsEmpty())
+    {
+        return false;
+    }
+    if (A.Equals(B, ESearchCase::IgnoreCase))
+    {
+        return true;
+    }
+
+    const int32 MinLen = FMath::Min(A.Len(), B.Len());
+    if (MinLen >= 40 && (A.Contains(B, ESearchCase::IgnoreCase) || B.Contains(A, ESearchCase::IgnoreCase)))
+    {
+        return true;
+    }
+
+    TArray<FString> At;
+    TArray<FString> Bt;
+    A.ParseIntoArrayWS(At);
+    B.ParseIntoArrayWS(Bt);
+    if (At.Num() < 5 || Bt.Num() < 5)
+    {
+        return false;
+    }
+
+    TSet<FString> ASet;
+    TSet<FString> BSet;
+    for (const FString& T : At)
+    {
+        if (T.Len() >= 3) ASet.Add(T);
+    }
+    for (const FString& T : Bt)
+    {
+        if (T.Len() >= 3) BSet.Add(T);
+    }
+    if (ASet.Num() == 0 || BSet.Num() == 0)
+    {
+        return false;
+    }
+
+    int32 Intersect = 0;
+    for (const FString& T : ASet)
+    {
+        if (BSet.Contains(T))
+        {
+            Intersect++;
+        }
+    }
+
+    const int32 Smaller = FMath::Min(ASet.Num(), BSet.Num());
+    const float Overlap = (Smaller > 0) ? ((float)Intersect / (float)Smaller) : 0.0f;
+    return Overlap >= 0.72f;
+}
+
+static bool LocalTalkerContextLooksRepetitive(const FLocalConversationContext& Context)
+{
+    if (Context.History.Num() < 4)
+    {
+        return false;
+    }
+
+    int32 LastUserIdx = INDEX_NONE;
+    for (int32 i = Context.History.Num() - 1; i >= 0; --i)
+    {
+        if (Context.History[i].bFromUser)
+        {
+            LastUserIdx = i;
+            break;
+        }
+    }
+
+    TArray<const FLocalTalkMessage*> RecentNpc;
+    for (int32 i = Context.History.Num() - 1; i > LastUserIdx && RecentNpc.Num() < 6; --i)
+    {
+        const FLocalTalkMessage& M = Context.History[i];
+        if (M.bFromUser)
+        {
+            continue;
+        }
+        if (LocalTalkerOneLineSubsystem(M.Content).IsEmpty())
+        {
+            continue;
+        }
+        RecentNpc.Add(&M);
+    }
+
+    if (RecentNpc.Num() < 4)
+    {
+        return false;
+    }
+
+    TSet<FString> UniqueRecent;
+    for (int32 i = 0; i < FMath::Min(4, RecentNpc.Num()); ++i)
+    {
+        UniqueRecent.Add(LocalTalkerNormalizeForLoopCompare(RecentNpc[i]->Content));
+    }
+    if (UniqueRecent.Num() <= 2)
+    {
+        return true;
+    }
+
+    int32 SimilarAdjacentPairs = 0;
+    int32 SimilarSameSpeakerPairs = 0;
+    for (int32 i = 0; i + 1 < RecentNpc.Num(); ++i)
+    {
+        if (LocalTalkerLikelySameUtterance(RecentNpc[i]->Content, RecentNpc[i + 1]->Content))
+        {
+            SimilarAdjacentPairs++;
+        }
+    }
+
+    for (int32 i = 0; i < RecentNpc.Num(); ++i)
+    {
+        for (int32 j = i + 1; j < RecentNpc.Num(); ++j)
+        {
+            if (!RecentNpc[i]->SpeakerName.Equals(RecentNpc[j]->SpeakerName, ESearchCase::IgnoreCase))
+            {
+                continue;
+            }
+            if (LocalTalkerLikelySameUtterance(RecentNpc[i]->Content, RecentNpc[j]->Content))
+            {
+                SimilarSameSpeakerPairs++;
+                break;
+            }
+        }
+    }
+
+    return (SimilarAdjacentPairs >= 1 && SimilarSameSpeakerPairs >= 1) || (SimilarSameSpeakerPairs >= 2);
+}
+
 void ULocalTalkConversationSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
@@ -467,6 +638,7 @@ void ULocalTalkConversationSubsystem::MaintainKeepAlive()
     const float MaxSilence = FMath::Max(0.0f, S->MaxSilenceSeconds);
     const float MinDelay = FMath::Max(0.0f, S->MinSecondsBetweenAutoReplies);
     const bool bAllowNpcToNpc = S->bAllowNpcToNpcAuto;
+    const int32 MaxNpcTurns = (S->MaxConsecutiveNpcTurns > 0) ? S->MaxConsecutiveNpcTurns : 6;
     const bool bRequireListener = S->bRequirePlayerListenerForAuto;
     const bool bIgnoreListener = S->bKeepAliveIgnoresPlayerListenerRequirement;
 
@@ -478,6 +650,21 @@ void ULocalTalkConversationSubsystem::MaintainKeepAlive()
     {
         if (Context.Participants.Num() == 0) continue;
         if (IsContextWithinPlayerPriorityWindow(Context, (double)Now)) continue;
+        if (Context.ConsecutiveNpcTurns >= MaxNpcTurns) continue;
+
+        if (LocalTalkerContextLooksRepetitive(Context))
+        {
+            if ((Now - Context.LastLoopGuardLogTime) > 3.0f)
+            {
+                Context.LastLoopGuardLogTime = Now;
+                UE_LOG(LogLocalTalker, Log,
+                    TEXT("%s[Director] KeepAlive paused for repetitive NPC loop (npcTurns=%d cap=%d)."),
+                    *LocalTalkerTimePrefixSubsystem(this),
+                    Context.ConsecutiveNpcTurns,
+                    MaxNpcTurns);
+            }
+            continue;
+        }
 
         // Allow one prewarm: block if anyone is generating or if more than one participant has pending audio.
         int32 NumGenerating = 0;
@@ -549,9 +736,16 @@ void ULocalTalkConversationSubsystem::MaintainKeepAlive()
         if (Context.History.Num() > 0)
         {
             const FLocalTalkMessage& LastMsg = Context.History.Last();
+            FString LastLine = LocalTalkerOneLineSubsystem(LastMsg.Content);
+            LastLine.ReplaceInline(TEXT("\""), TEXT("'"));
+            if (LastLine.Len() > 120)
+            {
+                LastLine = LastLine.Left(120) + TEXT("...");
+            }
             Prompt = FString::Printf(
-                TEXT("Director instruction: Keep the conversation alive. Respond in-character to %s, add a NEW concrete detail or viewpoint, avoid repeating their wording, and end with a fresh question."),
-                *LastMsg.SpeakerName
+                TEXT("Director instruction: Keep the conversation alive. Respond in-character to %s's latest line \"%s\". Introduce a NEW concrete detail, avoid repeating recent wording/themes, and ask one fresh, focused question."),
+                *LastMsg.SpeakerName,
+                *LastLine
             );
         }
         else
@@ -663,7 +857,7 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
     const FLocalTalkMessage& LastMsg = Context.History.Last();
 
     const bool bAllowNpcToNpc = S ? S->bAllowNpcToNpcAuto : false;
-    const int32 MaxNpcTurns = S ? S->MaxConsecutiveNpcTurns : 0;
+    const int32 MaxNpcTurns = S ? ((S->MaxConsecutiveNpcTurns > 0) ? S->MaxConsecutiveNpcTurns : 6) : 6;
     const float MinDelay = S ? S->MinSecondsBetweenAutoReplies : 0.0f;
     const float PostPauseMax = FMath::Max(0.0f, S ? S->PostTurnPauseMaxSeconds : 5.0f);
     const bool bRequireListener = S ? S->bRequirePlayerListenerForAuto : false;
@@ -677,11 +871,25 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
         {
             return;
         }
+        if (LocalTalkerContextLooksRepetitive(Context))
+        {
+            const float Now = W ? W->GetTimeSeconds() : 0.0f;
+            if ((Now - Context.LastLoopGuardLogTime) > 3.0f)
+            {
+                Context.LastLoopGuardLogTime = Now;
+                UE_LOG(LogLocalTalker, Log,
+                    TEXT("%s[Director] Auto-response paused for repetitive NPC loop (npcTurns=%d cap=%d)."),
+                    *LocalTalkerTimePrefixSubsystem(this),
+                    Context.ConsecutiveNpcTurns,
+                    MaxNpcTurns);
+            }
+            return;
+        }
         if (bRequireListener && !(bKeepAlive && bIgnoreListener) && !LocalTalkerIsAnyPlayerPawnInHearingRange(GetWorld(), Context))
         {
             return;
         }
-        if (MaxNpcTurns > 0 && Context.ConsecutiveNpcTurns > MaxNpcTurns)
+        if (Context.ConsecutiveNpcTurns >= MaxNpcTurns)
         {
             return;
         }
@@ -699,9 +907,16 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
             const float TimeSinceLast = GetWorld()->GetTimeSeconds() - Context.LastInteractionTime;
             if (TimeSinceLast < 5.0f)
             {
+                FString LastLine = LocalTalkerOneLineSubsystem(LastMsg.Content);
+                LastLine.ReplaceInline(TEXT("\""), TEXT("'"));
+                if (LastLine.Len() > 120)
+                {
+                    LastLine = LastLine.Left(120) + TEXT("...");
+                }
                 const FString Prompt = FString::Printf(
-                    TEXT("Director instruction: Respond in-character to %s. Add a NEW detail or viewpoint, do not echo their exact wording, and end with a natural follow-up question."),
-                    *LastMsg.SpeakerName
+                    TEXT("Director instruction: Respond in-character to %s's latest line \"%s\". Add a NEW detail or viewpoint, avoid repeating recent wording/themes, and end with one natural follow-up question."),
+                    *LastMsg.SpeakerName,
+                    *LastLine
                 );
                 UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] -> TRIGGERING RESPONSE from '%s'"),
                     *LocalTalkerTimePrefixSubsystem(this),
@@ -728,13 +943,20 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
         if (LastSpeaker->IsAudioPlaybackComplete() &&
             (!bRequireListener || LocalTalkerIsAnyPlayerPawnInHearingRange(GetWorld(), Context)))
         {
-            if (!(MaxNpcTurns > 0 && Context.ConsecutiveNpcTurns > MaxNpcTurns))
+            if (Context.ConsecutiveNpcTurns < MaxNpcTurns)
             {
                 const float TimeSinceLast = GetWorld()->GetTimeSeconds() - Context.LastInteractionTime;
                 if (TimeSinceLast < 5.0f)
                 {
+                    FString LastLine = LocalTalkerOneLineSubsystem(LastMsg.Content);
+                    LastLine.ReplaceInline(TEXT("\""), TEXT("'"));
+                    if (LastLine.Len() > 120)
+                    {
+                        LastLine = LastLine.Left(120) + TEXT("...");
+                    }
                     const FString Prompt = FString::Printf(
-                        TEXT("Director instruction: Continue speaking to the nearby listener. Add a NEW detail or viewpoint, do not echo your exact wording, and end with a natural question.")
+                        TEXT("Director instruction: Continue speaking to the nearby listener in-character. Build from \"%s\", add a NEW angle not used in your recent lines, and end with one natural question."),
+                        *LastLine
                     );
                     UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] -> TRIGGERING SOLO CONTINUATION from '%s'"),
                         *LocalTalkerTimePrefixSubsystem(this),

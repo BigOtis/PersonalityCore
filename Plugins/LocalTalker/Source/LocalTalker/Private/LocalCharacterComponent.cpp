@@ -1191,9 +1191,15 @@ static FString LocalTalkerBuildLlama3PromptFromContext(
     SystemBlock += FString::Printf(TEXT("- Your reply MUST begin with [%s] and end with [/%s].\n"), *SelfTag, *SelfTag);
     SystemBlock += TEXT("- Output only that single tagged block. No extra text before or after.\n");
     SystemBlock += FString::Printf(TEXT("- Do not output any other tags besides [%s] ... [/%s].\n"), *SelfTag, *SelfTag);
+    SystemBlock += TEXT("- Treat [PLAYER] as the human user. Never reinterpret [PLAYER] text as any NPC.\n");
+    SystemBlock += TEXT("- Preserve speaker identity from transcript tags; do not swap who said what.\n");
+    SystemBlock += TEXT("- If the latest transcript line is [PLAYER], address the player directly.\n");
     SystemBlock += TEXT("- No narration, no actions, no stage directions.\n");
     SystemBlock += TEXT("- 1-3 sentences, natural and specific.\n");
-    SystemBlock += TEXT("- Include exactly ONE concrete detail from the scene or context.\n");
+    SystemBlock += TEXT("- Include at least one concrete detail from the scene or context.\n");
+    SystemBlock += TEXT("- Move the conversation forward with a fresh point, reaction, or question.\n");
+    SystemBlock += TEXT("- Vary wording from your previous replies; avoid repeated sentence openings.\n");
+    SystemBlock += TEXT("- If recent NPC lines are looping, explicitly pivot to a new topic/detail before asking a question.\n");
     SystemBlock += FString::Printf(TEXT("- Do not repeat or paraphrase %s's last line.\n"), *SelfName);
     SystemBlock += TEXT("- Do not reuse any full sentence from the transcript.\n");
     SystemBlock += TEXT("- Do not reuse any 5+ word sequence from the transcript.\n");
@@ -1346,6 +1352,77 @@ static FString LocalTalkerBuildLlama3PromptFromContext(
         }
     }
 
+    {
+        TSet<FString> SeenMapNames;
+        UserBlock += TEXT("Speaker map:\n");
+        UserBlock += TEXT("- [PLAYER]: human player (user)\n");
+
+        if (!SelfSpeakerName.IsEmpty())
+        {
+            UserBlock += FString::Printf(TEXT("- [%s]: %s (you, NPC)\n"), *SelfTag, *SelfSpeakerName);
+            SeenMapNames.Add(SelfSpeakerName.ToLower());
+        }
+
+        for (ULocalCharacterComponent* P : ContextParticipants)
+        {
+            if (!P) continue;
+            const FString Name = P->GetSpeakerNameResolved();
+            if (Name.IsEmpty()) continue;
+            const FString NameKey = Name.ToLower();
+            if (SeenMapNames.Contains(NameKey)) continue;
+            SeenMapNames.Add(NameKey);
+            UserBlock += FString::Printf(TEXT("- [%s]: %s (NPC)\n"), *LocalTalkerTagForSpeakerName(Name, false), *Name);
+        }
+
+        for (const FLocalTalkMessage& M : ContextHistory)
+        {
+            if (M.bFromUser) continue;
+            if (M.SpeakerName.IsEmpty()) continue;
+            const FString NameKey = M.SpeakerName.ToLower();
+            if (SeenMapNames.Contains(NameKey)) continue;
+            SeenMapNames.Add(NameKey);
+            UserBlock += FString::Printf(TEXT("- [%s]: %s (NPC)\n"), *LocalTalkerTagForSpeakerName(M.SpeakerName, false), *M.SpeakerName);
+        }
+
+        UserBlock += TEXT("\n");
+    }
+
+    {
+        TArray<FString> RecentSelfLines;
+        for (int32 i = ContextHistory.Num() - 1; i >= StartIdx && RecentSelfLines.Num() < 3; --i)
+        {
+            const FLocalTalkMessage& M = ContextHistory[i];
+            if (M.bFromUser) continue;
+            if (!M.SpeakerName.Equals(SelfSpeakerName, ESearchCase::IgnoreCase)) continue;
+            const FString Clean = LocalTalkerOneLine(M.Content);
+            if (Clean.IsEmpty() || LocalTalkerIsMetaLine(Clean)) continue;
+
+            bool bAlreadyAdded = false;
+            for (const FString& Existing : RecentSelfLines)
+            {
+                if (Existing.Equals(Clean, ESearchCase::IgnoreCase))
+                {
+                    bAlreadyAdded = true;
+                    break;
+                }
+            }
+            if (!bAlreadyAdded)
+            {
+                RecentSelfLines.Add(Clean);
+            }
+        }
+
+        if (RecentSelfLines.Num() > 0)
+        {
+            UserBlock += TEXT("Your recent lines (avoid reusing this wording):\n");
+            for (const FString& Line : RecentSelfLines)
+            {
+                UserBlock += FString::Printf(TEXT("- %s\n"), *LocalTalkerPreview(Line, 140));
+            }
+            UserBlock += TEXT("\n");
+        }
+    }
+
     FString Transcript;
     Transcript += TEXT("[TRANSCRIPT]\n");
     bool bHasHistory = false;
@@ -1401,12 +1478,14 @@ static FString LocalTalkerBuildLlama3PromptFromContext(
     {
         UserBlock += TEXT("Current player message to answer now:\n");
         UserBlock += FString::Printf(TEXT("[PLAYER] %s [/PLAYER]\n"), *TurnPromptClean);
+        UserBlock += TEXT("This message is from the human player, not from any NPC.\n");
         UserBlock += TEXT("You MUST directly address this message in your first sentence.\n\n");
     }
     else if (!LatestUserClean.IsEmpty())
     {
         UserBlock += TEXT("Latest player message:\n");
         UserBlock += FString::Printf(TEXT("[PLAYER] %s [/PLAYER]\n"), *LatestUserClean);
+        UserBlock += TEXT("This message is from the human player, not from any NPC.\n");
         UserBlock += TEXT("If relevant, naturally acknowledge this in your next reply.\n\n");
     }
 

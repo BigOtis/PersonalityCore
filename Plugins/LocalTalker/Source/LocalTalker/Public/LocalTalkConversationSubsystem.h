@@ -50,6 +50,10 @@ struct FLocalConversationContext
     // Used for keep-alive auto-chatter to avoid re-enqueueing every tick.
     UPROPERTY()
     float LastAutoEnqueueTime = 0.0f;
+
+    // Throttle loop-guard logs per context.
+    UPROPERTY()
+    float LastLoopGuardLogTime = 0.0f;
 };
 
 /**

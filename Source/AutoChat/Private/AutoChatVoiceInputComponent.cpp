@@ -57,7 +57,7 @@ void UAutoChatVoiceInputComponent::BeginPlay()
         *ModeStr,
         MicInputDeviceName.IsEmpty() ? TEXT("<Default>") : *MicInputDeviceName);
     UE_LOG(LogAutoChatVoice, Log,
-        TEXT("[AutoChatVoiceInput] STT mode: alwaysOn=%d startRms=%.4f continueRms=%.4f bargeInRms=%.4f bargeMinActive=%.2fs bargeMinLoud=%.2fs bargeVeryLoud=%.3f silenceEnd=%.2fs minSpeech=%.2fs maxSpeech=%.2fs minActive=%.2fs minActiveRatio=%.2f bargeHold=%.2fs postSegHold=%.2fs postTextHold=%.2fs fenceMax=%.2fs rotateSingle=%d"),
+        TEXT("[AutoChatVoiceInput] STT mode: alwaysOn=%d startRms=%.4f continueRms=%.4f bargeInRms=%.4f bargeMinActive=%.2fs bargeMinLoud=%.2fs bargeVeryLoud=%.3f bargeForce=%.2fs submitGrace=%.2fs silenceEnd=%.2fs minSpeech=%.2fs maxSpeech=%.2fs minActive=%.2fs minActiveRatio=%.2f bargeHold=%.2fs postSegHold=%.2fs postTextHold=%.2fs fenceMax=%.2fs rotateSingle=%d"),
         bAlwaysOnAutoTranscribe ? 1 : 0,
         AutoTranscribeStartRmsThreshold,
         AutoTranscribeContinueRmsThreshold,
@@ -65,6 +65,8 @@ void UAutoChatVoiceInputComponent::BeginPlay()
         BargeInMinActiveSpeechSeconds,
         BargeInMinLoudSeconds,
         BargeInVeryLoudRmsThreshold,
+        BargeInForceInterruptActiveSeconds,
+        PostTranscriptBargeInGraceSeconds,
         AutoTranscribeSilenceSeconds,
         AutoTranscribeMinSpeechSeconds,
         AutoTranscribeMaxSpeechSeconds,
@@ -666,6 +668,63 @@ FString UAutoChatVoiceInputComponent::NormalizeTranscriptForRouting(const FStrin
         S.TrimEndInline();
     }
 
+    int32 AlphaCount = 0;
+    int32 DigitCount = 0;
+    for (int32 i = 0; i < S.Len(); ++i)
+    {
+        const TCHAR C = S[i];
+        if (FChar::IsAlpha(C))
+        {
+            AlphaCount++;
+        }
+        else if (FChar::IsDigit(C))
+        {
+            DigitCount++;
+        }
+    }
+
+    TArray<FString> Tokens;
+    S.ParseIntoArrayWS(Tokens);
+    int32 NumNumericOnly = 0;
+    int32 NumSingleChar = 0;
+    for (const FString& Token : Tokens)
+    {
+        if (Token.Len() == 1)
+        {
+            NumSingleChar++;
+        }
+
+        bool bAllDigits = !Token.IsEmpty();
+        for (int32 i = 0; i < Token.Len(); ++i)
+        {
+            if (!FChar::IsDigit(Token[i]))
+            {
+                bAllDigits = false;
+                break;
+            }
+        }
+        if (bAllDigits)
+        {
+            NumNumericOnly++;
+        }
+    }
+
+    // Reject number/noise-heavy transcripts (for example: "8 8 8 8 8 ...").
+    if (Tokens.Num() >= 8)
+    {
+        const float NumericRatio = (float)NumNumericOnly / (float)Tokens.Num();
+        const float SingleCharRatio = (float)NumSingleChar / (float)Tokens.Num();
+        if (NumericRatio >= 0.55f || SingleCharRatio >= 0.70f)
+        {
+            return FString();
+        }
+    }
+
+    if (AlphaCount < 8 && DigitCount > (AlphaCount * 2))
+    {
+        return FString();
+    }
+
     return S;
 }
 
@@ -1077,18 +1136,25 @@ void UAutoChatVoiceInputComponent::ProcessAlwaysOnAutoTranscribe(const float* Au
             return;
         }
 
-        const double SinceSubmit = Now - LastTranscriptSubmitWorldSeconds;
-        if (SinceSubmit < TranscriptSubmitBargeInGraceSeconds)
-        {
-            return;
-        }
-
         const double ActiveSeconds = (AutoSpeechSampleRate > 0)
             ? (double)AutoSpeechActiveFrames / (double)AutoSpeechSampleRate
             : 0.0;
         const double LoudSeconds = (AutoSpeechSampleRate > 0)
             ? (double)AutoSpeechLoudFrames / (double)AutoSpeechSampleRate
             : 0.0;
+        const double ActiveRatio = (AutoSpeechTotalFrames > 0)
+            ? (double)AutoSpeechActiveFrames / (double)AutoSpeechTotalFrames
+            : 0.0;
+
+        const bool bForceSustainedInterrupt =
+            ActiveSeconds >= (double)BargeInForceInterruptActiveSeconds &&
+            ActiveRatio >= (double)AutoTranscribeMinActiveRatio;
+
+        const double SinceSubmit = Now - LastTranscriptSubmitWorldSeconds;
+        if (SinceSubmit < (double)PostTranscriptBargeInGraceSeconds && !bForceSustainedInterrupt)
+        {
+            return;
+        }
 
         const bool bSustainedVoiceForBargeIn =
             ActiveSeconds >= (double)BargeInMinActiveSpeechSeconds &&
@@ -1097,20 +1163,22 @@ void UAutoChatVoiceInputComponent::ProcessAlwaysOnAutoTranscribe(const float* Au
             Rms >= BargeInVeryLoudRmsThreshold &&
             ActiveSeconds >= (double)BargeInMinActiveSpeechSeconds;
 
-        if (!bSustainedVoiceForBargeIn && !bVeryLoudOverride)
+        if (!bSustainedVoiceForBargeIn && !bVeryLoudOverride && !bForceSustainedInterrupt)
         {
             return;
         }
 
         bAutoSpeechSegmentBargeInTriggered = true;
         UE_LOG(LogAutoChatVoice, Log,
-            TEXT("[AutoChatVoiceInput] AlwaysOn barge-in trigger %s (rms=%.4f active=%.2fs loud=%.2fs sustained=%d veryLoud=%d)."),
+            TEXT("[AutoChatVoiceInput] AlwaysOn barge-in trigger %s (rms=%.4f active=%.2fs loud=%.2fs ratio=%.2f sustained=%d veryLoud=%d forced=%d)."),
             Phase ? Phase : TEXT("UNKNOWN"),
             Rms,
             ActiveSeconds,
             LoudSeconds,
+            ActiveRatio,
             bSustainedVoiceForBargeIn ? 1 : 0,
-            bVeryLoudOverride ? 1 : 0);
+            bVeryLoudOverride ? 1 : 0,
+            bForceSustainedInterrupt ? 1 : 0);
         AsyncTask(ENamedThreads::GameThread, [WeakThis = TWeakObjectPtr<UAutoChatVoiceInputComponent>(this)]()
         {
             if (UAutoChatVoiceInputComponent* Self = WeakThis.Get())

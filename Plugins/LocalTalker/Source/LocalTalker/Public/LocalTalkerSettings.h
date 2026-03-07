@@ -88,7 +88,7 @@ public:
     // Safety cap: after this many consecutive non-user messages in a context, the Director will stop auto-triggering.
     // Set to 0 for unlimited (recommended when bRequirePlayerListenerForAuto is enabled).
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Conversation", meta=(ClampMin="0"))
-    int32 MaxConsecutiveNpcTurns = 0;
+    int32 MaxConsecutiveNpcTurns = 6;
 
     // If enabled, NPC-to-NPC auto conversation will only run while at least one local player pawn
     // is within hearing range of the conversation participants.

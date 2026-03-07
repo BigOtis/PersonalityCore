@@ -63,6 +63,14 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.05", ClampMax="1.0"))
     float BargeInVeryLoudRmsThreshold = 0.20f;
 
+    /** Hard interrupt fallback: sustained active speech will force barge-in even if loud-threshold gates are not met. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.20", ClampMax="5.0"))
+    float BargeInForceInterruptActiveSeconds = 1.10f;
+
+    /** Brief grace period after transcript submit where only force/sustained barge-in may interrupt. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.0", ClampMax="6.0"))
+    float PostTranscriptBargeInGraceSeconds = 1.20f;
+
     /** If true, clear queued NPC turns near the player when voice capture begins so new player speech is prioritized. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice")
     bool bCancelQueuedTurnsOnVoiceCaptureStart = true;
@@ -277,6 +285,4 @@ private:
     /** World time when we last submitted a transcript; used to skip barge-in briefly so the AI can respond. */
     double LastTranscriptSubmitWorldSeconds = 0.0;
     int32 LastSingleTargetRouteIndex = INDEX_NONE;
-    /** Seconds after submitting a transcript during which segment START does not trigger barge-in. */
-    static constexpr double TranscriptSubmitBargeInGraceSeconds = 2.5;
 };
