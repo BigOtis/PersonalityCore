@@ -743,14 +743,14 @@ void ULocalTalkConversationSubsystem::MaintainKeepAlive()
                 LastLine = LastLine.Left(120) + TEXT("...");
             }
             Prompt = FString::Printf(
-                TEXT("Director instruction: Keep the conversation alive. Respond in-character to %s's latest line \"%s\". Introduce a NEW concrete detail, avoid repeating recent wording/themes, and ask one fresh, focused question."),
+                TEXT("Director instruction: Keep the conversation alive. Respond in-character to %s's latest line \"%s\". In your first sentence, directly acknowledge that line. Add one NEW concrete detail, avoid repeating recent wording/themes, and ask at most one short follow-up question only if it helps move the conversation forward."),
                 *LastMsg.SpeakerName,
                 *LastLine
             );
         }
         else
         {
-            Prompt = TEXT("Director instruction: Start a natural in-character conversation with the nearby person. Say something specific and end with a question.");
+            Prompt = TEXT("Director instruction: Start a natural in-character conversation with the nearby person. Say something specific. You may ask one short question only if it clearly opens a new thread.");
         }
 
         // Enforce pacing via the queued turn's earliest-grant time.
@@ -914,7 +914,7 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
                     LastLine = LastLine.Left(120) + TEXT("...");
                 }
                 const FString Prompt = FString::Printf(
-                    TEXT("Director instruction: Respond in-character to %s's latest line \"%s\". Add a NEW detail or viewpoint, avoid repeating recent wording/themes, and end with one natural follow-up question."),
+                    TEXT("Director instruction: Respond in-character to %s's latest line \"%s\". In your first sentence, directly acknowledge that line. Add one NEW detail or viewpoint, avoid repeating recent wording/themes, and ask at most one short follow-up question only if it advances the exchange."),
                     *LastMsg.SpeakerName,
                     *LastLine
                 );
@@ -955,7 +955,7 @@ void ULocalTalkConversationSubsystem::EvaluateNextSpeaker(FLocalConversationCont
                         LastLine = LastLine.Left(120) + TEXT("...");
                     }
                     const FString Prompt = FString::Printf(
-                        TEXT("Director instruction: Continue speaking to the nearby listener in-character. Build from \"%s\", add a NEW angle not used in your recent lines, and end with one natural question."),
+                        TEXT("Director instruction: Continue speaking to the nearby listener in-character. Build from \"%s\", add one NEW angle not used in your recent lines, and ask at most one short question only if it moves the conversation forward."),
                         *LastLine
                     );
                     UE_LOG(LogLocalTalker, Log, TEXT("%s[Director] -> TRIGGERING SOLO CONTINUATION from '%s'"),
@@ -1156,3 +1156,31 @@ bool ULocalTalkConversationSubsystem::HasPlayerListenerInRange(const ULocalChara
 
     return LocalTalkerIsAnyPlayerPawnInHearingRange(W, *Context);
 }
+
+#if WITH_EDITOR
+int32 ULocalTalkConversationSubsystem::Test_GetManualQueueUserCount() const
+{
+    int32 Count = 0;
+    for (const FQueuedTurn& Q : ManualQueue)
+    {
+        if (Q.bFromUser)
+        {
+            Count++;
+        }
+    }
+    return Count;
+}
+
+int32 ULocalTalkConversationSubsystem::Test_GetManualQueueNpcCount() const
+{
+    int32 Count = 0;
+    for (const FQueuedTurn& Q : ManualQueue)
+    {
+        if (!Q.bFromUser)
+        {
+            Count++;
+        }
+    }
+    return Count;
+}
+#endif

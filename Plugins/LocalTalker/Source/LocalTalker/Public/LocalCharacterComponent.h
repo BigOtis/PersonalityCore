@@ -14,6 +14,7 @@
 
 class ULocalTalkerInProcGenerateAsync;
 class FLocalTalkerTTSWorker;
+struct FLocalTalkMessage;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FLocalCharacterSpokenEvent, const FString&, Text);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FLocalCharacterErrorEvent, const FString&, Error);
@@ -179,6 +180,10 @@ public:
     int32 Test_GetPendingSentenceCount() const { return PendingSentenceCount.GetValue(); }
     int32 Test_GetLLMTextBufferLen() const { return LLMTextBuffer.Len(); }
     void Test_InitAudio() { EnsureAudio(); }
+    FString Test_BuildLlama3PromptFromContext(
+        const TArray<FLocalTalkMessage>& ContextHistory,
+        const TArray<ULocalCharacterComponent*>& ContextParticipants,
+        const FString& TurnPrompt) const;
 
     int32 MaxQueuedSentencesAhead = 10;
     int32 MaxBufferedCharsWhileBackpressured = 1000;

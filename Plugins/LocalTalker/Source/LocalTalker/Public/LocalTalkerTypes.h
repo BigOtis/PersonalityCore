@@ -61,34 +61,34 @@ struct FLocalTalkerCharacterConfig
     int32 MaxTokens = 56;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
-    float Temperature = 0.55f;
+    float Temperature = 0.42f;
 
     // --- Sampling controls (best-practice defaults for chatty dialogue without echo loops) ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0"))
-    int32 TopK = 40;
+    int32 TopK = 32;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0.0", ClampMax="1.0"))
-    float TopP = 0.90f;
+    float TopP = 0.88f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0.0", ClampMax="1.0"))
-    float MinP = 0.05f; // 0 disables min-p
+    float MinP = 0.08f; // 0 disables min-p
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0.0", ClampMax="1.0"))
-    float TypicalP = 1.0f; // 1 disables typical-p
+    float TypicalP = 0.95f; // 1 disables typical-p
 
     // Repetition / presence / frequency penalties (llama.cpp penalties sampler).
     // NOTE: penalties are applied after top-k/top-p for performance.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0"))
-    int32 RepeatLastN = 192;
+    int32 RepeatLastN = 256;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="1.0"))
-    float RepeatPenalty = 1.20f; // 1.0 disables
+    float RepeatPenalty = 1.28f; // 1.0 disables
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0.0"))
-    float FrequencyPenalty = 0.30f; // 0 disables
+    float FrequencyPenalty = 0.45f; // 0 disables
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker|Sampling", meta=(ClampMin="0.0"))
-    float PresencePenalty = 0.18f; // 0 disables
+    float PresencePenalty = 0.25f; // 0 disables
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker")
     int32 Seed = 0;

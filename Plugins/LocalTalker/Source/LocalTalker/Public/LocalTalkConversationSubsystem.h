@@ -119,6 +119,13 @@ public:
     TArray<ULocalCharacterComponent*> GetRegisteredTalkers() const;
     bool HasPlayerListenerInRange(const ULocalCharacterComponent* Talker) const;
 
+#if WITH_EDITOR
+    // Test helpers (editor automation only).
+    int32 Test_GetManualQueueSize() const { return ManualQueue.Num(); }
+    int32 Test_GetManualQueueUserCount() const;
+    int32 Test_GetManualQueueNpcCount() const;
+#endif
+
 private:
     UPROPERTY()
     TSet<TWeakObjectPtr<ULocalCharacterComponent>> Registry;

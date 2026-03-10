@@ -155,13 +155,14 @@ static FString BuildPrompt(const FLocalTalkerRuntimePaths& P, const FLocalTalker
     SystemBlock += TEXT("- Output only that single tagged block. No extra text before or after.\n");
     SystemBlock += FString::Printf(TEXT("- Do not output any other tags besides [%s] ... [/%s].\n"), *SpeakerTag, *SpeakerTag);
     SystemBlock += TEXT("- No narration, no actions, no stage directions.\n");
-    SystemBlock += TEXT("- 1-3 sentences, natural and specific.\n");
+    SystemBlock += TEXT("- 1-2 sentences, natural and specific.\n");
     SystemBlock += TEXT("- Include exactly ONE concrete detail from the scene or context.\n");
+    SystemBlock += TEXT("- If the latest player line is a question or request, answer it directly in sentence 1.\n");
     SystemBlock += TEXT("- Do not repeat or paraphrase the last line.\n");
     SystemBlock += TEXT("- Do not reuse any full sentence from the transcript.\n");
     SystemBlock += TEXT("- Do not reuse any 5+ word sequence from the transcript.\n");
     SystemBlock += TEXT("- If your draft matches any earlier line, discard it and write a different reply.\n");
-    SystemBlock += TEXT("- Do not ask the same question twice; ask a new question with new wording.\n");
+    SystemBlock += TEXT("- Ask at most one short question, and only if it adds new information.\n");
 
     // Keep system strictly for role + output rules. Character details belong in the user block.
 

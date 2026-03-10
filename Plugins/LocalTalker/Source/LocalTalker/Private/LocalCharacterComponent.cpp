@@ -1194,8 +1194,10 @@ static FString LocalTalkerBuildLlama3PromptFromContext(
     SystemBlock += TEXT("- Treat [PLAYER] as the human user. Never reinterpret [PLAYER] text as any NPC.\n");
     SystemBlock += TEXT("- Preserve speaker identity from transcript tags; do not swap who said what.\n");
     SystemBlock += TEXT("- If the latest transcript line is [PLAYER], address the player directly.\n");
+    SystemBlock += TEXT("- If the latest [PLAYER] line is a question or request, answer it directly in sentence 1.\n");
+    SystemBlock += TEXT("- Do not skip or talk past unanswered player questions.\n");
     SystemBlock += TEXT("- No narration, no actions, no stage directions.\n");
-    SystemBlock += TEXT("- 1-3 sentences, natural and specific.\n");
+    SystemBlock += TEXT("- 1-2 sentences, natural and specific.\n");
     SystemBlock += TEXT("- Include at least one concrete detail from the scene or context.\n");
     SystemBlock += TEXT("- Move the conversation forward with a fresh point, reaction, or question.\n");
     SystemBlock += TEXT("- Vary wording from your previous replies; avoid repeated sentence openings.\n");
@@ -1204,7 +1206,8 @@ static FString LocalTalkerBuildLlama3PromptFromContext(
     SystemBlock += TEXT("- Do not reuse any full sentence from the transcript.\n");
     SystemBlock += TEXT("- Do not reuse any 5+ word sequence from the transcript.\n");
     SystemBlock += TEXT("- If your draft matches any earlier line, discard it and write a different reply.\n");
-    SystemBlock += TEXT("- Do not ask the same question twice; ask a new question with new wording.\n");
+    SystemBlock += TEXT("- Ask at most one short question, and only if it adds new information.\n");
+    SystemBlock += TEXT("- Do not ask the same question twice; if unsure, offer one concrete next step instead.\n");
 
     // Keep system strictly for role + output rules. Character details go in the user block.
 
@@ -1565,6 +1568,22 @@ FString ULocalCharacterComponent::BuildPromptWithHistory(const FLocalTalkerChara
     P += TEXT("User: ") + UserText + TEXT("\nAssistant:");
     return P;
 }
+
+#if WITH_EDITOR
+FString ULocalCharacterComponent::Test_BuildLlama3PromptFromContext(
+    const TArray<FLocalTalkMessage>& ContextHistory,
+    const TArray<ULocalCharacterComponent*>& ContextParticipants,
+    const FString& TurnPrompt) const
+{
+    const FLocalTalkerCharacterConfig Config = ResolveConfig();
+    return LocalTalkerBuildLlama3PromptFromContext(
+        GetSpeakerNameResolved(),
+        Config,
+        ContextHistory,
+        ContextParticipants,
+        TurnPrompt);
+}
+#endif
 
 FLocalTalkerRuntimePaths ULocalCharacterComponent::ResolvePaths() const
 {

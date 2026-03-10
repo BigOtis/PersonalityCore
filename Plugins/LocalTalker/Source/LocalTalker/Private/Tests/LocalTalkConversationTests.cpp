@@ -96,6 +96,80 @@ void CleanupTalkers(
     if (A2) A2->Destroy();
     if (A3) A3->Destroy();
 }
+
+FString NormalizeLineForTranscriptChecks(const FString& In)
+{
+    FString S = In.ToLower();
+    S.ReplaceInline(TEXT("\r"), TEXT(" "));
+    S.ReplaceInline(TEXT("\n"), TEXT(" "));
+    S.ReplaceInline(TEXT("\t"), TEXT(" "));
+    for (int32 i = 0; i < S.Len(); ++i)
+    {
+        const TCHAR C = S[i];
+        if (!FChar::IsAlnum(C) && !FChar::IsWhitespace(C))
+        {
+            S[i] = TEXT(' ');
+        }
+    }
+    while (S.Contains(TEXT("  ")))
+    {
+        S.ReplaceInline(TEXT("  "), TEXT(" "));
+    }
+    S.TrimStartAndEndInline();
+    return S;
+}
+
+TSet<FString> ExtractKeywords(const FString& In)
+{
+    static const TSet<FString> Stop =
+    {
+        TEXT("the"), TEXT("and"), TEXT("that"), TEXT("this"), TEXT("with"),
+        TEXT("what"), TEXT("when"), TEXT("where"), TEXT("which"), TEXT("have"),
+        TEXT("from"), TEXT("your"), TEXT("about"), TEXT("into"), TEXT("plan"),
+        TEXT("will"), TEXT("should"), TEXT("could"), TEXT("would"), TEXT("there"),
+        TEXT("they"), TEXT("them"), TEXT("then"), TEXT("just"), TEXT("more"),
+        TEXT("does"), TEXT("need"), TEXT("enough"), TEXT("for"), TEXT("are")
+    };
+
+    TSet<FString> Out;
+    TArray<FString> Tokens;
+    NormalizeLineForTranscriptChecks(In).ParseIntoArrayWS(Tokens);
+    for (const FString& Token : Tokens)
+    {
+        if (Token.Len() < 4)
+        {
+            continue;
+        }
+        if (!Stop.Contains(Token))
+        {
+            Out.Add(Token);
+        }
+    }
+    return Out;
+}
+
+bool LineAcknowledgesUserIntent(const FString& UserLine, const FString& NpcLine)
+{
+    const FString NpcNorm = NormalizeLineForTranscriptChecks(NpcLine);
+    if (NpcNorm.IsEmpty())
+    {
+        return false;
+    }
+
+    const TSet<FString> Keywords = ExtractKeywords(UserLine);
+    for (const FString& Keyword : Keywords)
+    {
+        if (NpcNorm.Contains(Keyword))
+        {
+            return true;
+        }
+    }
+
+    return NpcNorm.StartsWith(TEXT("yes ")) ||
+           NpcNorm.StartsWith(TEXT("no ")) ||
+           NpcNorm.Contains(TEXT("yes,")) ||
+           NpcNorm.Contains(TEXT("no,"));
+}
 } // namespace
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -347,6 +421,214 @@ bool FLocalTalkPlayerInteractionComponentTest::RunTest(const FString& Parameters
 
     PlayerActor->Destroy();
     CleanupTalkers(Sub, AliceActor, Alice);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FLocalTalkConversationUserTurnUpgradesQueuedNpcTurnTest,
+    "Plugins.LocalTalker.Dialog.E2E.UserTurnUpgradesQueuedNpcTurn",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FLocalTalkConversationUserTurnUpgradesQueuedNpcTurnTest::RunTest(const FString& Parameters)
+{
+    UWorld* World = GetAutomationWorld();
+    if (!World)
+    {
+        AddError(TEXT("Editor world not found."));
+        return false;
+    }
+
+    ULocalTalkConversationSubsystem* Sub = World->GetSubsystem<ULocalTalkConversationSubsystem>();
+    if (!Sub)
+    {
+        AddError(TEXT("Conversation subsystem not found."));
+        return false;
+    }
+
+    AActor* Actor = nullptr;
+    ULocalCharacterComponent* Talker = nullptr;
+    const FVector Base(940000.0f, 310000.0f, 100.0f);
+    if (!SpawnTalker(*this, World, Sub, Base, TEXT("Responder"), Actor, Talker))
+    {
+        CleanupTalkers(Sub, Actor, Talker);
+        return false;
+    }
+
+    Sub->ClearContextHistory(Talker);
+    Sub->RequestTurn(Talker, TEXT("Director instruction: give a side update."), /*bFromUser*/false);
+    TestEqual(TEXT("One queued turn should exist after NPC request."), Sub->Test_GetManualQueueSize(), 1);
+    TestEqual(TEXT("Queued turn should currently be NPC."), Sub->Test_GetManualQueueNpcCount(), 1);
+
+    const FString PlayerPrompt = TEXT("Please answer my question directly.");
+    Sub->RequestTurn(Talker, PlayerPrompt, /*bFromUser*/true);
+
+    TestEqual(TEXT("Queue size should stay at one turn for same talker."), Sub->Test_GetManualQueueSize(), 1);
+    TestEqual(TEXT("NPC queue entry should be upgraded to a user turn."), Sub->Test_GetManualQueueNpcCount(), 0);
+    TestEqual(TEXT("Exactly one queued user turn should remain."), Sub->Test_GetManualQueueUserCount(), 1);
+
+    const TArray<FLocalTalkMessage> History = Sub->GetContextHistory(Talker);
+    TestEqual(TEXT("User prompt should be recorded in history immediately."), History.Num(), 1);
+    if (History.Num() == 1)
+    {
+        TestTrue(TEXT("Recorded prompt should be marked as user input."), History[0].bFromUser);
+        TestEqual(TEXT("Recorded user content should match latest prompt."), History[0].Content, PlayerPrompt);
+    }
+
+    CleanupTalkers(Sub, Actor, Talker);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FLocalTalkConversationPromptPlayerFirstContractTest,
+    "Plugins.LocalTalker.Dialog.E2E.PromptPlayerFirstContract",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FLocalTalkConversationPromptPlayerFirstContractTest::RunTest(const FString& Parameters)
+{
+    UWorld* World = GetAutomationWorld();
+    if (!World)
+    {
+        AddError(TEXT("Editor world not found."));
+        return false;
+    }
+
+    ULocalTalkConversationSubsystem* Sub = World->GetSubsystem<ULocalTalkConversationSubsystem>();
+    if (!Sub)
+    {
+        AddError(TEXT("Conversation subsystem not found."));
+        return false;
+    }
+
+    AActor* AliceActor = nullptr;
+    AActor* BobActor = nullptr;
+    ULocalCharacterComponent* Alice = nullptr;
+    ULocalCharacterComponent* Bob = nullptr;
+
+    const FVector Base(980000.0f, 320000.0f, 100.0f);
+    if (!SpawnTalker(*this, World, Sub, Base, TEXT("Alice"), AliceActor, Alice) ||
+        !SpawnTalker(*this, World, Sub, Base + FVector(100.0f, 0.0f, 0.0f), TEXT("Bob"), BobActor, Bob))
+    {
+        CleanupTalkers(Sub, AliceActor, Alice, BobActor, Bob);
+        return false;
+    }
+
+    TArray<FLocalTalkMessage> History;
+    History.Add({ TEXT("User"), TEXT("Can we cross the bridge now or should we wait?"), true });
+    History.Add({ TEXT("Bob"), TEXT("The wind is still strong but the ropes look stable."), false });
+
+    TArray<ULocalCharacterComponent*> Participants;
+    Participants.Add(Alice);
+    Participants.Add(Bob);
+
+    const FString Prompt = Alice->Test_BuildLlama3PromptFromContext(
+        History,
+        Participants,
+        TEXT("Can we cross the bridge now or should we wait?"));
+
+    TestTrue(TEXT("Prompt must include player-first rule for question/request responses."),
+        Prompt.Contains(TEXT("If the latest [PLAYER] line is a question or request, answer it directly in sentence 1.")));
+    TestTrue(TEXT("Prompt must include unanswered-player guard."),
+        Prompt.Contains(TEXT("Do not skip or talk past unanswered player questions.")));
+    TestTrue(TEXT("Prompt must cap follow-up questions to reduce loops."),
+        Prompt.Contains(TEXT("Ask at most one short question")));
+    TestTrue(TEXT("Prompt should include the current player message in tagged form."),
+        Prompt.Contains(TEXT("[PLAYER] Can we cross the bridge now or should we wait? [/PLAYER]")));
+
+    CleanupTalkers(Sub, AliceActor, Alice, BobActor, Bob);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FLocalTalkConversationMockedTranscriptQualityTest,
+    "Plugins.LocalTalker.Dialog.E2E.MockedTranscriptQualityHeuristic",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FLocalTalkConversationMockedTranscriptQualityTest::RunTest(const FString& Parameters)
+{
+    UWorld* World = GetAutomationWorld();
+    if (!World)
+    {
+        AddError(TEXT("Editor world not found."));
+        return false;
+    }
+
+    ULocalTalkConversationSubsystem* Sub = World->GetSubsystem<ULocalTalkConversationSubsystem>();
+    if (!Sub)
+    {
+        AddError(TEXT("Conversation subsystem not found."));
+        return false;
+    }
+
+    AActor* AliceActor = nullptr;
+    AActor* BobActor = nullptr;
+    ULocalCharacterComponent* Alice = nullptr;
+    ULocalCharacterComponent* Bob = nullptr;
+
+    const FVector Base(1020000.0f, 330000.0f, 100.0f);
+    if (!SpawnTalker(*this, World, Sub, Base, TEXT("Alice"), AliceActor, Alice) ||
+        !SpawnTalker(*this, World, Sub, Base + FVector(120.0f, 0.0f, 0.0f), TEXT("Bob"), BobActor, Bob))
+    {
+        CleanupTalkers(Sub, AliceActor, Alice, BobActor, Bob);
+        return false;
+    }
+
+    Sub->ClearContextHistory(Alice);
+
+    Sub->RequestTurn(Alice, TEXT("We need a safe canyon route before dusk. What's the best plan?"), /*bFromUser*/true);
+    Sub->BroadcastSentence(Alice, TEXT("For this canyon route, let's use the east ridge because the crosswind is weaker there."), false);
+    Sub->BroadcastSentence(Bob, TEXT("Agreed, and I'll mark that ridge route with flares every fifty meters so we stay aligned."), false);
+    Sub->RequestTurn(Bob, TEXT("Do we have enough batteries for those flares overnight?"), /*bFromUser*/true);
+    Sub->BroadcastSentence(Alice, TEXT("Yes, we packed three spare batteries, so the flares can run through the night shift."), false);
+    Sub->BroadcastSentence(Bob, TEXT("Then we keep one battery in reserve and move at dusk to avoid the strongest gusts."), false);
+
+    const TArray<FLocalTalkMessage> History = Sub->GetContextHistory(Alice);
+    TestTrue(TEXT("Mocked transcript should contain at least six lines."), History.Num() >= 6);
+
+    bool bHasAdjacentDuplicate = false;
+    for (int32 i = 1; i < History.Num(); ++i)
+    {
+        const FString Prev = NormalizeLineForTranscriptChecks(History[i - 1].Content);
+        const FString Curr = NormalizeLineForTranscriptChecks(History[i].Content);
+        if (!Prev.IsEmpty() && Prev.Equals(Curr, ESearchCase::CaseSensitive))
+        {
+            bHasAdjacentDuplicate = true;
+            break;
+        }
+    }
+    TestFalse(TEXT("Transcript should avoid adjacent duplicate lines."), bHasAdjacentDuplicate);
+
+    bool bAllUserTurnsAcknowledged = true;
+    for (int32 i = 0; i < History.Num(); ++i)
+    {
+        if (!History[i].bFromUser)
+        {
+            continue;
+        }
+
+        bool bAcknowledged = false;
+        for (int32 j = i + 1; j < History.Num() && j <= i + 2; ++j)
+        {
+            if (History[j].bFromUser)
+            {
+                continue;
+            }
+            if (LineAcknowledgesUserIntent(History[i].Content, History[j].Content))
+            {
+                bAcknowledged = true;
+                break;
+            }
+        }
+
+        if (!bAcknowledged)
+        {
+            bAllUserTurnsAcknowledged = false;
+            break;
+        }
+    }
+
+    TestTrue(TEXT("Each user turn should be acknowledged by nearby NPC responses."), bAllUserTurnsAcknowledged);
+
+    CleanupTalkers(Sub, AliceActor, Alice, BobActor, Bob);
     return true;
 }
 
