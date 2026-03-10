@@ -803,7 +803,7 @@ void ULocalTalkConversationSubsystem::AddMessageToContext(FLocalConversationCont
     Context.History.Add({ Speaker, Text, bFromUser });
     // Keep a slightly longer rolling window of messages so the LLM can
     // see more prior turns when building prompts.
-    const int32 MaxHistoryMessages = 16;
+    const int32 MaxHistoryMessages = 24;
     if (Context.History.Num() > MaxHistoryMessages)
     {
         Context.History.RemoveAt(0);

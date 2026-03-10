@@ -9,6 +9,7 @@
 
 class ULocalCharacterComponent;
 class ULocalPlayerInteractionComponent;
+class ULocalTalkConversationSubsystem;
 class UUserWidget;
 class APlayerController;
 
@@ -37,7 +38,7 @@ public:
 
     /** If true and not broadcasting, rotate target selection across nearby AIs instead of always nearest. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice")
-    bool bRotateSingleTargetAcrossNearby = true;
+    bool bRotateSingleTargetAcrossNearby = false;
 
     /** Apply selected mic settings onto target AI components before routing text. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice")
@@ -168,6 +169,14 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.25", ClampMax="30.0"))
     float PostSegmentPriorityHoldSeconds = 8.0f;
 
+    /** While always-on capture is actively hearing speech, hold short player priority so NPC turns don't race ahead of pending transcript context. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.0", ClampMax="12.0"))
+    float ActiveSegmentPriorityHoldSeconds = 2.0f;
+
+    /** Refresh cadence for active-segment player priority hold (lower keeps tighter suppression during speech). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.10", ClampMax="5.0"))
+    float ActiveSegmentPriorityRefreshSeconds = 0.80f;
+
     /** Seconds to keep player priority active when a transcript is submitted to nearby AI. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.25", ClampMax="20.0"))
     float PostTranscriptPriorityHoldSeconds = 4.0f;
@@ -215,6 +224,26 @@ public:
     /** Repetition guard dominant ratio (0-1). Higher means less strict filtering. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.50", ClampMax="1.0"))
     float MaxDominantSentenceRatio = 0.72f;
+
+    /** Reject transcripts that strongly overlap very recent nearby NPC lines (likely speaker bleed/echo). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice")
+    bool bRejectLikelyNpcEchoTranscripts = true;
+
+    /** Overlap threshold (0-1) used by NPC-echo rejection. Higher = stricter match required. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.50", ClampMax="1.0"))
+    float NpcEchoSimilarityThreshold = 0.72f;
+
+    /** Number of most recent nearby NPC lines to compare against when detecting echo transcripts. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="1", ClampMax="12"))
+    int32 NpcEchoRecentNpcLines = 4;
+
+    /** Reject low-diversity transcripts that look like ASR hallucination/noise loops. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice")
+    bool bRejectLowQualityTranscripts = true;
+
+    /** Minimum unique-token ratio for longer transcripts before they are treated as low-quality. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.20", ClampMax="1.0"))
+    float MinTranscriptUniqueTokenRatio = 0.45f;
 
     UPROPERTY(BlueprintAssignable, Category="AutoChat|Voice")
     FAutoChatVoiceSubmittedEvent OnTranscriptSubmitted;
@@ -302,6 +331,12 @@ private:
     void EndPlayerSpeechFence(const TCHAR* Reason);
     FString NormalizeTranscriptForRouting(const FString& InText) const;
     bool IsTranscriptLikelyRepetitionSpam(const FString& InText, FString& OutReason) const;
+    bool IsTranscriptLikelyNpcEcho(
+        const FString& InText,
+        const ULocalTalkConversationSubsystem* Sub,
+        const TArray<ULocalCharacterComponent*>& CandidateTargets,
+        FString& OutReason) const;
+    bool IsTranscriptLikelyLowQuality(const FString& InText, FString& OutReason) const;
 
     UPROPERTY(Transient)
     TObjectPtr<UUserWidget> ActiveMicSelectorWidget = nullptr;
@@ -346,6 +381,7 @@ private:
     int32 AutoSpeechStartGateFrames = 0;
     TArray<int16> AutoSpeechPcm16;
     float AdaptiveNoiseFloorRms = 0.0f;
+    double LastActiveSegmentPriorityApplyWorldSeconds = -1.0;
 
     /** World time when we last submitted a transcript; used to skip barge-in briefly so the AI can respond. */
     double LastTranscriptSubmitWorldSeconds = 0.0;

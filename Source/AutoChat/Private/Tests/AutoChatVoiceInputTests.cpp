@@ -371,6 +371,121 @@ bool FAutoChatVoiceInputRepetitionSpamGuardTest::RunTest(const FString& Paramete
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FAutoChatVoiceInputRejectsNpcEchoTranscriptTest,
+    "Project.AutoChat.VoiceInput.RejectsLikelyNpcEchoTranscript",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAutoChatVoiceInputRejectsNpcEchoTranscriptTest::RunTest(const FString& Parameters)
+{
+    UWorld* World = GetAutomationWorld();
+    if (!World)
+    {
+        AddError(TEXT("Editor world not found."));
+        return false;
+    }
+
+    ULocalTalkConversationSubsystem* Sub = World->GetSubsystem<ULocalTalkConversationSubsystem>();
+    if (!Sub)
+    {
+        AddError(TEXT("Conversation subsystem not found."));
+        return false;
+    }
+
+    AActor* AIActor = nullptr;
+    ULocalCharacterComponent* AI = nullptr;
+    const FVector Base(675000.0f, 158000.0f, 100.0f);
+    if (!SpawnTalker(*this, World, Sub, Base + FVector(180.0f, 0.0f, 0.0f), TEXT("Guide"), AIActor, AI))
+    {
+        CleanupTalkers(Sub, AIActor, AI);
+        return false;
+    }
+
+    AActor* PlayerActor = SpawnRootedActor(World, Base);
+    if (!PlayerActor)
+    {
+        AddError(TEXT("Failed to spawn player actor."));
+        CleanupTalkers(Sub, AIActor, AI);
+        return false;
+    }
+
+    UAutoChatVoiceInputComponent* VoiceComp = NewObject<UAutoChatVoiceInputComponent>(PlayerActor);
+    VoiceComp->RegisterComponent();
+    VoiceComp->MaxInteractionRange = 1200.0f;
+    VoiceComp->bRejectLikelyNpcEchoTranscripts = true;
+    VoiceComp->NpcEchoSimilarityThreshold = 0.70f;
+
+    const FString NpcLine = TEXT("Let's regroup at the north bridge and hold position.");
+    Sub->BroadcastSentence(AI, NpcLine, /*bFromUser*/false);
+
+    const bool bAccepted = VoiceComp->SubmitRecognizedSpeech(NpcLine);
+    TestFalse(TEXT("Likely NPC-echo transcript should be rejected."), bAccepted);
+
+    const TArray<FLocalTalkMessage> History = Sub->GetContextHistory(AI);
+    const int32 UserLines = Algo::CountIf(History, [](const FLocalTalkMessage& M) { return M.bFromUser; });
+    TestEqual(TEXT("Echo-rejected transcript should not add user history."), UserLines, 0);
+
+    PlayerActor->Destroy();
+    CleanupTalkers(Sub, AIActor, AI);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FAutoChatVoiceInputRejectsLowQualityTranscriptTest,
+    "Project.AutoChat.VoiceInput.RejectsLowQualityTranscript",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAutoChatVoiceInputRejectsLowQualityTranscriptTest::RunTest(const FString& Parameters)
+{
+    UWorld* World = GetAutomationWorld();
+    if (!World)
+    {
+        AddError(TEXT("Editor world not found."));
+        return false;
+    }
+
+    ULocalTalkConversationSubsystem* Sub = World->GetSubsystem<ULocalTalkConversationSubsystem>();
+    if (!Sub)
+    {
+        AddError(TEXT("Conversation subsystem not found."));
+        return false;
+    }
+
+    AActor* AIActor = nullptr;
+    ULocalCharacterComponent* AI = nullptr;
+    const FVector Base(688000.0f, 159000.0f, 100.0f);
+    if (!SpawnTalker(*this, World, Sub, Base + FVector(170.0f, 0.0f, 0.0f), TEXT("Scout"), AIActor, AI))
+    {
+        CleanupTalkers(Sub, AIActor, AI);
+        return false;
+    }
+
+    AActor* PlayerActor = SpawnRootedActor(World, Base);
+    if (!PlayerActor)
+    {
+        AddError(TEXT("Failed to spawn player actor."));
+        CleanupTalkers(Sub, AIActor, AI);
+        return false;
+    }
+
+    UAutoChatVoiceInputComponent* VoiceComp = NewObject<UAutoChatVoiceInputComponent>(PlayerActor);
+    VoiceComp->RegisterComponent();
+    VoiceComp->MaxInteractionRange = 1200.0f;
+    VoiceComp->bRejectLowQualityTranscripts = true;
+    VoiceComp->MinTranscriptUniqueTokenRatio = 0.45f;
+
+    const FString LowQuality = TEXT("hey hey hey hey hey hey hey hey hey hey hey hey");
+    const bool bAccepted = VoiceComp->SubmitRecognizedSpeech(LowQuality);
+    TestFalse(TEXT("Low-quality repetitive transcript should be rejected."), bAccepted);
+
+    const TArray<FLocalTalkMessage> History = Sub->GetContextHistory(AI);
+    TestEqual(TEXT("Low-quality rejected transcript should not be written to history."), History.Num(), 0);
+
+    PlayerActor->Destroy();
+    CleanupTalkers(Sub, AIActor, AI);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FAutoChatVoiceInputSingleTargetRotationTest,
     "Project.AutoChat.VoiceInput.RotateSingleTargetAcrossNearbyAIs",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

@@ -1079,6 +1079,33 @@ static FString LocalTalkerCleanSpokenText(const FString& In)
         }
     }
 
+    // If generation ended mid-tag (e.g. "[/REX_R"), drop the dangling tail.
+    {
+        const int32 OpenIdx = S.Find(TEXT("["), ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+        if (OpenIdx != INDEX_NONE)
+        {
+            const FString Tail = S.Mid(OpenIdx + 1);
+            if (!Tail.Contains(TEXT("]")))
+            {
+                bool bLooksLikeTag = !Tail.IsEmpty();
+                for (int32 i = 0; i < Tail.Len() && bLooksLikeTag; ++i)
+                {
+                    const TCHAR C = Tail[i];
+                    if (!(FChar::IsAlnum(C) || C == TEXT('_') || C == TEXT('/')))
+                    {
+                        bLooksLikeTag = false;
+                    }
+                }
+
+                if (bLooksLikeTag)
+                {
+                    S = S.Left(OpenIdx);
+                    S.TrimStartAndEndInline();
+                }
+            }
+        }
+    }
+
     if (LocalTalkerIsMetaLine(S))
     {
         return FString();
@@ -1193,6 +1220,7 @@ static FString LocalTalkerBuildLlama3PromptFromContext(
     SystemBlock += FString::Printf(TEXT("- Do not output any other tags besides [%s] ... [/%s].\n"), *SelfTag, *SelfTag);
     SystemBlock += TEXT("- Treat [PLAYER] as the human user. Never reinterpret [PLAYER] text as any NPC.\n");
     SystemBlock += TEXT("- Preserve speaker identity from transcript tags; do not swap who said what.\n");
+    SystemBlock += TEXT("- Speak only as your own character; do not write lines for other speakers.\n");
     SystemBlock += TEXT("- If the latest transcript line is [PLAYER], address the player directly.\n");
     SystemBlock += TEXT("- If the latest [PLAYER] line is a question or request, answer it directly in sentence 1.\n");
     SystemBlock += TEXT("- Do not skip or talk past unanswered player questions.\n");
@@ -1206,6 +1234,7 @@ static FString LocalTalkerBuildLlama3PromptFromContext(
     SystemBlock += TEXT("- Do not reuse any full sentence from the transcript.\n");
     SystemBlock += TEXT("- Do not reuse any 5+ word sequence from the transcript.\n");
     SystemBlock += TEXT("- If your draft matches any earlier line, discard it and write a different reply.\n");
+    SystemBlock += TEXT("- Never output bracket-tag fragments such as [/NAME] in spoken dialogue.\n");
     SystemBlock += TEXT("- Ask at most one short question, and only if it adds new information.\n");
     SystemBlock += TEXT("- Do not ask the same question twice; if unsure, offer one concrete next step instead.\n");
 

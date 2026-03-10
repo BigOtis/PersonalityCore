@@ -15,6 +15,92 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogAutoChatVoice, Log, All);
 
+namespace
+{
+void LocalVoiceTokenize(const FString& InText, TArray<FString>& OutTokens)
+{
+    OutTokens.Reset();
+
+    FString Current;
+    Current.Reserve(24);
+
+    auto FlushCurrent = [&]()
+    {
+        if (Current.Len() >= 2)
+        {
+            OutTokens.Add(Current);
+        }
+        Current.Reset();
+    };
+
+    for (int32 i = 0; i < InText.Len(); ++i)
+    {
+        const TCHAR C = InText[i];
+        if (FChar::IsAlpha(C) || FChar::IsDigit(C))
+        {
+            Current.AppendChar(FChar::ToLower(C));
+        }
+        else
+        {
+            FlushCurrent();
+        }
+    }
+    FlushCurrent();
+}
+
+float LocalVoiceTokenOverlapScore(const TArray<FString>& A, const TArray<FString>& B)
+{
+    if (A.Num() == 0 || B.Num() == 0)
+    {
+        return 0.0f;
+    }
+
+    TMap<FString, int32> CountA;
+    TMap<FString, int32> CountB;
+    for (const FString& T : A)
+    {
+        CountA.FindOrAdd(T)++;
+    }
+    for (const FString& T : B)
+    {
+        CountB.FindOrAdd(T)++;
+    }
+
+    int32 Common = 0;
+    for (const TPair<FString, int32>& Pair : CountA)
+    {
+        if (const int32* BCount = CountB.Find(Pair.Key))
+        {
+            Common += FMath::Min(Pair.Value, *BCount);
+        }
+    }
+
+    const int32 Den = FMath::Min(A.Num(), B.Num());
+    if (Den <= 0)
+    {
+        return 0.0f;
+    }
+    return (float)Common / (float)Den;
+}
+
+float LocalVoiceUniqueTokenRatio(const TArray<FString>& Tokens, int32& OutDominantCount)
+{
+    OutDominantCount = 0;
+    if (Tokens.Num() == 0)
+    {
+        return 1.0f;
+    }
+
+    TMap<FString, int32> Counts;
+    for (const FString& Tok : Tokens)
+    {
+        const int32 NewCount = ++Counts.FindOrAdd(Tok);
+        OutDominantCount = FMath::Max(OutDominantCount, NewCount);
+    }
+    return (float)Counts.Num() / (float)Tokens.Num();
+}
+}
+
 UAutoChatVoiceInputComponent::UAutoChatVoiceInputComponent()
 {
     PrimaryComponentTick.bCanEverTick = false;
@@ -57,7 +143,7 @@ void UAutoChatVoiceInputComponent::BeginPlay()
         *ModeStr,
         MicInputDeviceName.IsEmpty() ? TEXT("<Default>") : *MicInputDeviceName);
     UE_LOG(LogAutoChatVoice, Log,
-        TEXT("[AutoChatVoiceInput] STT mode: alwaysOn=%d startRms=%.4f continueRms=%.4f startHold=%.2fs bargeInRms=%.4f bargeMinActive=%.2fs bargeMinLoud=%.2fs bargeVeryLoud=%.3f bargeForce=%.2fs submitGrace=%.2fs silenceEnd=%.2fs minSpeech=%.2fs maxSpeech=%.2fs minActive=%.2fs minActiveRatio=%.2f bargeHold=%.2fs postSegHold=%.2fs postTextHold=%.2fs fenceMax=%.2fs fenceOnSegStart=%d bargeNeedAudible=%d dropAIAudibleSeg=%d adaptiveNoise=%d noiseFloor=[%.4f..%.4f] startMul=%.2f contMul=%.2f bargeMul=%.2f maxEffStart=%.4f maxEffCont=%.4f rotateSingle=%d"),
+        TEXT("[AutoChatVoiceInput] STT mode: alwaysOn=%d startRms=%.4f continueRms=%.4f startHold=%.2fs bargeInRms=%.4f bargeMinActive=%.2fs bargeMinLoud=%.2fs bargeVeryLoud=%.3f bargeForce=%.2fs submitGrace=%.2fs silenceEnd=%.2fs minSpeech=%.2fs maxSpeech=%.2fs minActive=%.2fs minActiveRatio=%.2f bargeHold=%.2fs postSegHold=%.2fs activeSegHold=%.2fs activeSegRefresh=%.2fs postTextHold=%.2fs fenceMax=%.2fs fenceOnSegStart=%d bargeNeedAudible=%d dropAIAudibleSeg=%d adaptiveNoise=%d noiseFloor=[%.4f..%.4f] startMul=%.2f contMul=%.2f bargeMul=%.2f maxEffStart=%.4f maxEffCont=%.4f echoGuard=%d echoThr=%.2f lowQual=%d minUnique=%.2f rotateSingle=%d"),
         bAlwaysOnAutoTranscribe ? 1 : 0,
         AutoTranscribeStartRmsThreshold,
         AutoTranscribeContinueRmsThreshold,
@@ -75,6 +161,8 @@ void UAutoChatVoiceInputComponent::BeginPlay()
         AutoTranscribeMinActiveRatio,
         BargeInPriorityHoldSeconds,
         PostSegmentPriorityHoldSeconds,
+        ActiveSegmentPriorityHoldSeconds,
+        ActiveSegmentPriorityRefreshSeconds,
         PostTranscriptPriorityHoldSeconds,
         PlayerSpeechFenceMaxSeconds,
         bFenceDuringAlwaysOnSegment ? 1 : 0,
@@ -88,6 +176,10 @@ void UAutoChatVoiceInputComponent::BeginPlay()
         AdaptiveBargeInThresholdMultiplier,
         MaxEffectiveStartRmsThreshold,
         MaxEffectiveContinueRmsThreshold,
+        bRejectLikelyNpcEchoTranscripts ? 1 : 0,
+        NpcEchoSimilarityThreshold,
+        bRejectLowQualityTranscripts ? 1 : 0,
+        MinTranscriptUniqueTokenRatio,
         bRotateSingleTargetAcrossNearby ? 1 : 0);
 
     // Also log the available microphone devices from LocalTalker.
@@ -558,7 +650,50 @@ bool UAutoChatVoiceInputComponent::SubmitRecognizedSpeech(const FString& Transcr
         return false;
     }
 
-    // At this point we received non-empty text from an STT backend.
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        OnVoiceError.Broadcast(TEXT("World is not available."));
+        return false;
+    }
+
+    ULocalTalkConversationSubsystem* Sub = World->GetSubsystem<ULocalTalkConversationSubsystem>();
+    if (!Sub)
+    {
+        OnVoiceError.Broadcast(TEXT("LocalTalk conversation subsystem is not available."));
+        return false;
+    }
+
+    TArray<ULocalCharacterComponent*> Targets = FindNearbyAIs();
+    if (Targets.Num() == 0)
+    {
+        UE_LOG(LogAutoChatVoice, Warning,
+            TEXT("[AutoChatVoiceInput] No AI talkers in range for transcript \"%s\""),
+            *Text);
+        return false;
+    }
+
+    FString QualityReason;
+    if (bRejectLowQualityTranscripts && IsTranscriptLikelyLowQuality(Text, QualityReason))
+    {
+        UE_LOG(LogAutoChatVoice, Log,
+            TEXT("[AutoChatVoiceInput] Transcript ignored by low-quality guard: %s text=\"%s\""),
+            *QualityReason,
+            *Text.Left(120));
+        return false;
+    }
+
+    FString EchoReason;
+    if (bRejectLikelyNpcEchoTranscripts && IsTranscriptLikelyNpcEcho(Text, Sub, Targets, EchoReason))
+    {
+        UE_LOG(LogAutoChatVoice, Log,
+            TEXT("[AutoChatVoiceInput] Transcript ignored by NPC-echo guard: %s text=\"%s\""),
+            *EchoReason,
+            *Text.Left(120));
+        return false;
+    }
+
+    // At this point we have accepted a transcript for routing.
     {
         const FString OwnerName = GetOwner() ? GetOwner()->GetName() : TEXT("<NoOwner>");
         FString Preview = Text;
@@ -574,20 +709,6 @@ bool UAutoChatVoiceInputComponent::SubmitRecognizedSpeech(const FString& Transcr
             *Preview);
     }
 
-    UWorld* World = GetWorld();
-    if (!World)
-    {
-        OnVoiceError.Broadcast(TEXT("World is not available."));
-        return false;
-    }
-
-    ULocalTalkConversationSubsystem* Sub = World->GetSubsystem<ULocalTalkConversationSubsystem>();
-    if (!Sub)
-    {
-        OnVoiceError.Broadcast(TEXT("LocalTalk conversation subsystem is not available."));
-        return false;
-    }
-
     // Re-assert player priority right before routing transcript so NPC auto-turns do not race ahead.
     if (bInterruptNearbyAIOnVoiceCaptureStart)
     {
@@ -601,15 +722,6 @@ bool UAutoChatVoiceInputComponent::SubmitRecognizedSpeech(const FString& Transcr
         }
     }
     ApplyPlayerSpeechPriorityWindow(PostTranscriptPriorityHoldSeconds, TEXT("transcript_submit"));
-
-    TArray<ULocalCharacterComponent*> Targets = FindNearbyAIs();
-    if (Targets.Num() == 0)
-    {
-        UE_LOG(LogAutoChatVoice, Warning,
-            TEXT("[AutoChatVoiceInput] No AI talkers in range for transcript \"%s\""),
-            *Text);
-        return false;
-    }
 
     int32 RoutedCount = 0;
     const int32 NumToRoute = bBroadcastToAllNearby ? Targets.Num() : 1;
@@ -833,6 +945,163 @@ bool UAutoChatVoiceInputComponent::IsTranscriptLikelyRepetitionSpam(const FStrin
             Sentences.Num(),
             *Dominant.Left(80));
         return true;
+    }
+
+    return false;
+}
+
+bool UAutoChatVoiceInputComponent::IsTranscriptLikelyNpcEcho(
+    const FString& InText,
+    const ULocalTalkConversationSubsystem* Sub,
+    const TArray<ULocalCharacterComponent*>& CandidateTargets,
+    FString& OutReason) const
+{
+    OutReason.Reset();
+    if (!Sub || CandidateTargets.Num() == 0 || InText.IsEmpty())
+    {
+        return false;
+    }
+
+    TArray<FString> InputTokens;
+    LocalVoiceTokenize(InText, InputTokens);
+    if (InputTokens.Num() < 4)
+    {
+        return false;
+    }
+
+    TArray<FString> RecentNpcLines;
+    TSet<FString> SeenLower;
+    const int32 PerTargetLimit = FMath::Clamp(NpcEchoRecentNpcLines, 1, 12);
+    for (ULocalCharacterComponent* Target : CandidateTargets)
+    {
+        if (!Target)
+        {
+            continue;
+        }
+
+        TArray<FLocalTalkMessage> History = const_cast<ULocalTalkConversationSubsystem*>(Sub)->GetContextHistory(Target);
+        int32 AddedForTarget = 0;
+        for (int32 i = History.Num() - 1; i >= 0 && AddedForTarget < PerTargetLimit; --i)
+        {
+            const FLocalTalkMessage& M = History[i];
+            if (M.bFromUser)
+            {
+                continue;
+            }
+
+            FString Line = M.Content;
+            Line.ReplaceInline(TEXT("\r"), TEXT(" "));
+            Line.ReplaceInline(TEXT("\n"), TEXT(" "));
+            Line.TrimStartAndEndInline();
+            if (Line.Len() < MinAcceptedTranscriptChars)
+            {
+                continue;
+            }
+
+            const FString Lower = Line.ToLower();
+            if (SeenLower.Contains(Lower))
+            {
+                continue;
+            }
+
+            SeenLower.Add(Lower);
+            RecentNpcLines.Add(Line);
+            AddedForTarget++;
+        }
+    }
+
+    if (RecentNpcLines.Num() == 0)
+    {
+        return false;
+    }
+
+    float BestScore = 0.0f;
+    FString BestLine;
+    for (const FString& NpcLine : RecentNpcLines)
+    {
+        TArray<FString> NpcTokens;
+        LocalVoiceTokenize(NpcLine, NpcTokens);
+        if (NpcTokens.Num() < 3)
+        {
+            continue;
+        }
+
+        const float Score = LocalVoiceTokenOverlapScore(InputTokens, NpcTokens);
+        if (Score > BestScore)
+        {
+            BestScore = Score;
+            BestLine = NpcLine;
+        }
+    }
+
+    if (BestScore >= FMath::Clamp(NpcEchoSimilarityThreshold, 0.50f, 1.0f))
+    {
+        OutReason = FString::Printf(
+            TEXT("similarity=%.2f threshold=%.2f npcLine=\"%s\""),
+            BestScore,
+            NpcEchoSimilarityThreshold,
+            *BestLine.Left(90));
+        return true;
+    }
+
+    return false;
+}
+
+bool UAutoChatVoiceInputComponent::IsTranscriptLikelyLowQuality(const FString& InText, FString& OutReason) const
+{
+    OutReason.Reset();
+    if (InText.IsEmpty())
+    {
+        return false;
+    }
+
+    TArray<FString> Tokens;
+    LocalVoiceTokenize(InText, Tokens);
+    if (Tokens.Num() < 8)
+    {
+        return false;
+    }
+
+    int32 DominantTokenCount = 0;
+    const float UniqueRatio = LocalVoiceUniqueTokenRatio(Tokens, DominantTokenCount);
+    const float DominantRatio = (float)DominantTokenCount / (float)Tokens.Num();
+
+    if (UniqueRatio < FMath::Clamp(MinTranscriptUniqueTokenRatio, 0.20f, 1.0f) && DominantRatio >= 0.30f)
+    {
+        OutReason = FString::Printf(
+            TEXT("uniqueRatio=%.2f dominantTokenRatio=%.2f tokens=%d"),
+            UniqueRatio,
+            DominantRatio,
+            Tokens.Num());
+        return true;
+    }
+
+    if (Tokens.Num() >= 10)
+    {
+        TMap<FString, int32> TrigramCounts;
+        int32 MaxTrigramCount = 0;
+        FString DominantTrigram;
+        for (int32 i = 0; i + 2 < Tokens.Num(); ++i)
+        {
+            const FString Tri = Tokens[i] + TEXT(" ") + Tokens[i + 1] + TEXT(" ") + Tokens[i + 2];
+            int32& C = TrigramCounts.FindOrAdd(Tri);
+            C++;
+            if (C > MaxTrigramCount)
+            {
+                MaxTrigramCount = C;
+                DominantTrigram = Tri;
+            }
+        }
+
+        if (MaxTrigramCount >= 2 && UniqueRatio < 0.70f)
+        {
+            OutReason = FString::Printf(
+                TEXT("repeatedTrigram=%d trigram=\"%s\" uniqueRatio=%.2f"),
+                MaxTrigramCount,
+                *DominantTrigram.Left(60),
+                UniqueRatio);
+            return true;
+        }
     }
 
     return false;
@@ -1311,6 +1580,7 @@ void UAutoChatVoiceInputComponent::ProcessAlwaysOnAutoTranscribe(const float* Au
             bAutoSpeechSegmentHadAudibleAI = bNearbyAIAudibleNow;
             AutoSpeechStartWorldSeconds = Now;
             AutoSpeechLastActiveWorldSeconds = Now;
+            LastActiveSegmentPriorityApplyWorldSeconds = -1.0;
             AutoSpeechSampleRate = SampleRate;
             AutoSpeechNumChannels = NumChannels;
             AutoSpeechTotalFrames = 0;
@@ -1374,6 +1644,7 @@ void UAutoChatVoiceInputComponent::ProcessAlwaysOnAutoTranscribe(const float* Au
         bAutoSpeechSegmentActive = false;
         bAutoSpeechSegmentBargeInTriggered = false;
         bAutoSpeechSegmentHadAudibleAI = false;
+        LastActiveSegmentPriorityApplyWorldSeconds = -1.0;
         AutoSpeechStartGateFrames = 0;
         AutoSpeechTotalFrames = 0;
         AutoSpeechActiveFrames = 0;
@@ -1399,6 +1670,42 @@ void UAutoChatVoiceInputComponent::ProcessAlwaysOnAutoTranscribe(const float* Au
     {
         bAutoSpeechSegmentHadAudibleAI = true;
     }
+
+    // While a player segment is actively accumulating speech, keep a short
+    // priority window refreshed so NPC auto-turns don't race ahead of the
+    // in-flight transcript context.
+    {
+        const double ActiveSpeechSecondsNow = (AutoSpeechSampleRate > 0)
+            ? ((double)AutoSpeechActiveFrames / (double)AutoSpeechSampleRate)
+            : 0.0;
+        const double ActiveRatioNow = (AutoSpeechTotalFrames > 0)
+            ? ((double)AutoSpeechActiveFrames / (double)AutoSpeechTotalFrames)
+            : 0.0;
+
+        const double MinActiveForPriority = (double)FMath::Max(0.18f, AutoTranscribeMinActiveSpeechSeconds * 0.75f);
+        const double MinRatioForPriority = (double)FMath::Max(0.35f, AutoTranscribeMinActiveRatio * 0.90f);
+        const bool bLikelyHumanSpeechNow =
+            (ActiveSpeechSecondsNow >= MinActiveForPriority) ||
+            ((AutoSpeechTotalFrames >= FMath::Max(1, AutoSpeechSampleRate / 2)) && (ActiveRatioNow >= MinRatioForPriority));
+
+        if (ActiveSegmentPriorityHoldSeconds > 0.0f && bLikelyHumanSpeechNow)
+        {
+            const double RefreshCadence = (double)FMath::Max(0.10f, ActiveSegmentPriorityRefreshSeconds);
+            if (LastActiveSegmentPriorityApplyWorldSeconds < 0.0 ||
+                (Now - LastActiveSegmentPriorityApplyWorldSeconds) >= RefreshCadence)
+            {
+                LastActiveSegmentPriorityApplyWorldSeconds = Now;
+                AsyncTask(ENamedThreads::GameThread, [WeakThis = TWeakObjectPtr<UAutoChatVoiceInputComponent>(this)]()
+                {
+                    if (UAutoChatVoiceInputComponent* Self = WeakThis.Get())
+                    {
+                        Self->ApplyPlayerSpeechPriorityWindow(Self->ActiveSegmentPriorityHoldSeconds, TEXT("always_on_segment_active"));
+                    }
+                });
+            }
+        }
+    }
+
     TryTriggerBargeIn(TEXT("DURING segment"));
 
     const double SegmentSeconds = Now - AutoSpeechStartWorldSeconds;
@@ -1421,6 +1728,7 @@ void UAutoChatVoiceInputComponent::ProcessAlwaysOnAutoTranscribe(const float* Au
     bAutoSpeechSegmentActive = false;
     bAutoSpeechSegmentBargeInTriggered = false;
     bAutoSpeechSegmentHadAudibleAI = false;
+    LastActiveSegmentPriorityApplyWorldSeconds = -1.0;
     AutoSpeechStartGateFrames = 0;
     AutoSpeechSampleRate = 0;
     AutoSpeechNumChannels = 0;
