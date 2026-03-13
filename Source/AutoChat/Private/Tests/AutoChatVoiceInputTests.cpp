@@ -631,6 +631,61 @@ bool FAutoChatVoiceInputSubmitCancelsQueuedNpcTurnsTest::RunTest(const FString& 
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FAutoChatVoiceInputLowGainFallbackStartTest,
+    "Project.AutoChat.VoiceInput.LowGainFallbackStartsSegment",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAutoChatVoiceInputLowGainFallbackStartTest::RunTest(const FString& Parameters)
+{
+    UWorld* World = GetAutomationWorld();
+    if (!World)
+    {
+        AddError(TEXT("Editor world not found."));
+        return false;
+    }
+
+    AActor* PlayerActor = SpawnRootedActor(World, FVector(818000.0f, 175000.0f, 100.0f));
+    if (!PlayerActor)
+    {
+        AddError(TEXT("Failed to spawn player actor."));
+        return false;
+    }
+
+    UAutoChatVoiceInputComponent* VoiceComp = NewObject<UAutoChatVoiceInputComponent>(PlayerActor);
+    if (!VoiceComp)
+    {
+        AddError(TEXT("Failed to create UAutoChatVoiceInputComponent."));
+        PlayerActor->Destroy();
+        return false;
+    }
+    VoiceComp->RegisterComponent();
+
+    VoiceComp->Test_SetMicCaptureActive(true);
+    VoiceComp->bAlwaysOnAutoTranscribe = true;
+    VoiceComp->bUseAdaptiveNoiseFloor = false;
+    VoiceComp->AutoTranscribeStartRmsThreshold = 0.032f;
+    VoiceComp->AutoTranscribeContinueRmsThreshold = 0.020f;
+    VoiceComp->AutoTranscribeStartHoldSeconds = 0.10f;
+
+    const int32 SampleRate = 1000;
+    const int32 NumChannels = 1;
+    const int32 NumFrames = 32;
+
+    TArray<float> LowGainChunk;
+    LowGainChunk.Init(0.012f, NumFrames * NumChannels);
+
+    for (int32 i = 0; i < 9 && !VoiceComp->Test_IsAlwaysOnSegmentActive(); ++i)
+    {
+        VoiceComp->Test_ProcessAlwaysOnChunk(LowGainChunk.GetData(), NumFrames, NumChannels, SampleRate, 0.012f);
+    }
+
+    TestTrue(TEXT("Low-gain sustained speech should trigger fallback segment start."), VoiceComp->Test_IsAlwaysOnSegmentActive());
+
+    PlayerActor->Destroy();
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FAutoChatVoiceInputDropAIAudibleSegmentWithoutBargeInTest,
     "Project.AutoChat.VoiceInput.DropsAIAudibleSegmentWithoutBargeIn",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

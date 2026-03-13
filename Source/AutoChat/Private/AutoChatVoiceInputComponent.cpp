@@ -1468,15 +1468,29 @@ void UAutoChatVoiceInputComponent::ProcessAlwaysOnAutoTranscribe(const float* Au
         EffectiveContinueRms = FMath::Min(EffectiveContinueRms, MaxEffectiveContinueRmsThreshold);
     }
     EffectiveContinueRms = FMath::Min(EffectiveContinueRms, EffectiveStartRms);
+    const float LowGainStartRms = FMath::Max(
+        0.009f,
+        FMath::Max(
+            AutoTranscribeContinueRmsThreshold * 0.55f,
+            AutoTranscribeStartRmsThreshold * 0.35f));
+    const float AdaptiveFallbackStartRms = bUseAdaptiveNoiseFloor
+        ? (AdaptiveNoiseFloorRms * 1.20f + 0.0005f)
+        : 0.0f;
     const float FallbackStartRms = FMath::Clamp(
-        FMath::Min(EffectiveStartRms, FMath::Max(0.014f, AutoTranscribeStartRmsThreshold * 0.65f)),
-        0.010f,
+        FMath::Min(EffectiveStartRms, FMath::Max(LowGainStartRms, AdaptiveFallbackStartRms)),
+        0.0085f,
         EffectiveStartRms);
-    const float FallbackStartHoldSeconds = FMath::Max(0.22f, AutoTranscribeStartHoldSeconds * 2.0f);
-    const float EffectiveLoudRms = bUseAdaptiveNoiseFloor
+    const float FallbackStartHoldSeconds = FMath::Max(0.28f, AutoTranscribeStartHoldSeconds * 2.5f);
+    const float LoudRmsBase = bUseAdaptiveNoiseFloor
         ? FMath::Max(BargeInMinRmsThreshold, AdaptiveNoiseFloorRms * FMath::Max(1.0f, AdaptiveBargeInThresholdMultiplier) + 0.004f)
         : BargeInMinRmsThreshold;
-    const float EffectiveVeryLoudRms = FMath::Max(BargeInVeryLoudRmsThreshold, EffectiveLoudRms * 1.8f);
+    const float LowGainLoudRms = FMath::Max(
+        0.018f,
+        FMath::Max(FallbackStartRms * 1.25f, EffectiveContinueRms * 1.10f));
+    const float EffectiveLoudRms = FMath::Min(LoudRmsBase, LowGainLoudRms);
+    const float EffectiveVeryLoudRms = FMath::Max(
+        EffectiveLoudRms * 1.8f,
+        FMath::Max(0.035f, FallbackStartRms * 2.5f));
     const bool bNearbyAIAudibleNow = HasNearbyAudibleAISpeech();
 
     auto AppendChunkPcm16 = [&]()

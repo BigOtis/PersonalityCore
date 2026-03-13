@@ -11,9 +11,9 @@ REQUEST  (one JSON line → stdin):
   {"cmd":"shutdown"}
 
 RESPONSE (streaming):
-  {"streaming_chunk":true,"chunk_index":0,"pcm_base64":"...","sample_rate":24000,"num_samples":N,"num_channels":1}
+  {"streaming_chunk":true,"request_id":"...","chunk_index":0,"pcm_base64":"...","sample_rate":24000,"num_samples":N,"num_channels":1}
   ...
-  {"ok":true,"streaming_done":true,"total_samples":N,"num_channels":1,"total_chunks":N,"metrics":{...}}
+  {"ok":true,"streaming_done":true,"request_id":"...","total_samples":N,"num_channels":1,"total_chunks":N,"metrics":{...}}
 
 RESPONSE (non-streaming):
   {"ok":true,"sample_rate":24000,"num_samples":N,"num_channels":1,"pcm_base64":"...","metrics":{...}}
@@ -196,6 +196,7 @@ def _handle_synthesize(worker: KokoroWorker, req: dict):
             total_chunks += 1
             _write({
                 "streaming_chunk": True,
+                "request_id": req_id,
                 "chunk_index": i,
                 "pcm_base64": b64,
                 "sample_rate": sr,
@@ -208,6 +209,7 @@ def _handle_synthesize(worker: KokoroWorker, req: dict):
         _write({
             "ok": True,
             "streaming_done": True,
+            "request_id": req_id,
             "sample_rate": 24000,
             "total_samples": total_samples,
             "num_channels": 1,

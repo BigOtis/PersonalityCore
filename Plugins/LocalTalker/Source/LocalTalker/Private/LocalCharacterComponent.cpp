@@ -397,7 +397,7 @@ void ULocalCharacterComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
         {
             const double NowSeconds = W->GetTimeSeconds();
 
-            if (!AudioComp->IsPlaying() && !PendingAudioWave)
+            if (!AudioComp->IsPlaying() && !PendingAudioWave && PendingAudioPayloads.Num() == 0)
             {
                 // Guard: IsPlaying() can be false for 1-2 frames right after AudioComp->Play()
                 // while the audio thread processes the command.  Don't call HandleAudioFinished
@@ -422,7 +422,7 @@ void ULocalCharacterComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
         else
         {
             // No world — simple fallback (no transient guard needed, no world time available).
-            if (!AudioComp->IsPlaying() && !PendingAudioWave)
+            if (!AudioComp->IsPlaying() && !PendingAudioWave && PendingAudioPayloads.Num() == 0)
             {
                 HandleAudioFinished();
             }
@@ -1750,9 +1750,7 @@ void ULocalCharacterComponent::Interrupt()
 
     PendingSentenceCount.Reset();
     bAudioPlaybackComplete = true;
-    PendingAudioWave = nullptr;
-    PendingSubtitleText.Reset();
-    PendingSubtitleDurationSeconds = 0.0f;
+    ResetPendingAudioState();
 
     if (AudioComp) AudioComp->Stop();
 
@@ -1814,11 +1812,7 @@ void ULocalCharacterComponent::SpeakTextLocal(const FString& Text)
     bSpokeThisTurn = false;
     bNotifiedSubsystemFinished = false;
     bAudioPlaybackComplete = true;
-    PendingAudioWave = nullptr;
-    PendingSubtitleText.Reset();
-    PendingSubtitleDurationSeconds = 0.0f;
-    ActiveAudioStartWorldSeconds = 0.0;
-    ActiveAudioDurationSeconds = 0.0f;
+    ResetPendingAudioState();
 
     EnsureAudio();
     EnqueueSentence(Text);
@@ -1857,11 +1851,7 @@ void ULocalCharacterComponent::InternalGrantTurn(const FString& PromptOrText)
     bSpokeThisTurn = false;
     bNotifiedSubsystemFinished = false;
     bAudioPlaybackComplete = true;
-    PendingAudioWave = nullptr;
-    PendingSubtitleText.Reset();
-    PendingSubtitleDurationSeconds = 0.0f;
-    ActiveAudioStartWorldSeconds = 0.0;
-    ActiveAudioDurationSeconds = 0.0f;
+    ResetPendingAudioState();
     PendingSentenceCount.Reset();
 
     LLMTextBuffer.Reset();
@@ -2349,11 +2339,105 @@ void ULocalCharacterComponent::StopTTSWorker()
     ShutdownKokoroWorker();
 }
 
+void ULocalCharacterComponent::ResetPendingAudioState()
+{
+    AudioRequestEpoch.Increment();
+    PendingAudioWave = nullptr;
+    PendingAudioRequestId.Reset();
+    PendingSubtitleText.Reset();
+    PendingSubtitleDurationSeconds = 0.0f;
+    PendingAudioPayloads.Reset();
+    ActiveAudioRequestId.Reset();
+    ActiveAudioStartWorldSeconds = 0.0;
+    ActiveAudioDurationSeconds = 0.0f;
+    bWaitingForOtherSpeaker = false;
+    BlockedSinceSeconds = 0.0;
+}
+
+void ULocalCharacterComponent::QueuePendingAudioPayload(
+    USoundWaveProcedural* Wave,
+    const FString& SubtitleText,
+    float SubtitleDurationSeconds,
+    const FString& RequestId,
+    int32 RequestEpoch)
+{
+    if (!Wave)
+    {
+        return;
+    }
+    if (bInterrupted || AudioRequestEpoch.GetValue() != RequestEpoch)
+    {
+        if (LocalTalkerShouldLogAudioTrace())
+        {
+            UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Dropping stale audio payload req='%s' (epoch=%d current=%d interrupted=%d)."),
+                *LocalTalkerTimePrefix(this),
+                *GetSpeakerNameResolved(),
+                *RequestId,
+                RequestEpoch,
+                AudioRequestEpoch.GetValue(),
+                bInterrupted ? 1 : 0);
+        }
+        return;
+    }
+
+    FLocalTalkPendingAudioPayload& Payload = PendingAudioPayloads.Emplace_GetRef();
+    Payload.Wave = Wave;
+    Payload.SubtitleText = SubtitleText;
+    Payload.SubtitleDurationSeconds = SubtitleDurationSeconds;
+    Payload.RequestId = RequestId;
+
+    bAudioPlaybackComplete = false;
+    TryStartPendingAudio();
+}
+
+void ULocalCharacterComponent::ApplyAudioDurationForRequest(
+    const FString& RequestId,
+    float DurationSeconds,
+    int32 RequestEpoch)
+{
+    if (DurationSeconds <= 0.0f || RequestId.IsEmpty())
+    {
+        return;
+    }
+    if (bInterrupted || AudioRequestEpoch.GetValue() != RequestEpoch)
+    {
+        return;
+    }
+
+    if (PendingAudioRequestId == RequestId)
+    {
+        PendingSubtitleDurationSeconds = DurationSeconds;
+    }
+    for (FLocalTalkPendingAudioPayload& Payload : PendingAudioPayloads)
+    {
+        if (Payload.RequestId == RequestId)
+        {
+            Payload.SubtitleDurationSeconds = DurationSeconds;
+            break;
+        }
+    }
+    if (ActiveAudioRequestId == RequestId &&
+        ActiveAudioStartWorldSeconds > 0.0 &&
+        ActiveAudioDurationSeconds > 0.0f)
+    {
+        ActiveAudioDurationSeconds = DurationSeconds;
+    }
+}
+
 void ULocalCharacterComponent::TryStartPendingAudio()
 {
     const bool bTraceAudio = LocalTalkerShouldLogAudioTrace();
 
     if (bInterrupted) return;
+    if (!PendingAudioWave && PendingAudioPayloads.Num() > 0)
+    {
+        FLocalTalkPendingAudioPayload Payload = MoveTemp(PendingAudioPayloads[0]);
+        PendingAudioPayloads.RemoveAt(0);
+        PendingAudioWave = Payload.Wave.Get();
+        PendingAudioRequestId = MoveTemp(Payload.RequestId);
+        PendingSubtitleText = MoveTemp(Payload.SubtitleText);
+        PendingSubtitleDurationSeconds = Payload.SubtitleDurationSeconds;
+    }
     if (!PendingAudioWave) return;
 
     EnsureAudio();
@@ -2395,15 +2479,17 @@ void ULocalCharacterComponent::TryStartPendingAudio()
     AudioComp->SetSound(PendingAudioWave);
     if (bTraceAudio)
     {
-        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] TryStartPendingAudio play request: wave=%p dur=%.2fs subtitleChars=%d"),
+        UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] TryStartPendingAudio play request: req='%s' wave=%p dur=%.2fs subtitleChars=%d"),
             *LocalTalkerTimePrefix(this),
             *GetSpeakerNameResolved(),
+            *PendingAudioRequestId,
             PendingAudioWave,
             PendingSubtitleDurationSeconds,
             PendingSubtitleText.Len());
     }
     AudioComp->Play();
     bAudioPlaybackComplete = false;
+    ActiveAudioRequestId = PendingAudioRequestId;
     ActiveAudioStartWorldSeconds = 0.0;
     ActiveAudioDurationSeconds = PendingSubtitleDurationSeconds;
     if (UWorld* W = GetWorld())
@@ -2453,6 +2539,7 @@ void ULocalCharacterComponent::TryStartPendingAudio()
     }
 
     PendingAudioWave = nullptr;
+    PendingAudioRequestId.Reset();
     PendingSubtitleText.Reset();
     PendingSubtitleDurationSeconds = 0.0f;
 }
@@ -2463,10 +2550,13 @@ void ULocalCharacterComponent::HandleAudioFinished()
     bAudioPlaybackComplete = true;
     ActiveAudioStartWorldSeconds = 0.0;
     ActiveAudioDurationSeconds = 0.0f;
-    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Audio stopped (completed). pendingWave=%p"),
+    UE_LOG(LogLocalTalker, Log, TEXT("%s[%s] Audio stopped (completed). activeReq='%s' pendingWave=%p pendingQueue=%d"),
         *LocalTalkerTimePrefix(this),
         *GetSpeakerNameResolved(),
-        PendingAudioWave);
+        *ActiveAudioRequestId,
+        PendingAudioWave,
+        PendingAudioPayloads.Num());
+    ActiveAudioRequestId.Reset();
     TryStartPendingAudio();
     if (UWorld* W = GetWorld())
     {
@@ -2761,6 +2851,7 @@ void ULocalCharacterComponent::RunKokoroSentenceToAudio(
     FString Voice;
     ResolveKokoroVoiceSelection(Voice);
 
+    const int32 RequestEpoch = AudioRequestEpoch.GetValue();
     const FString ReqId = FString::Printf(TEXT("%s-%llu"), *GetSpeakerNameResolved(), (uint64)FPlatformTime::Cycles64());
 
     TSharedRef<FJsonObject> Req = MakeShared<FJsonObject>();
@@ -2812,6 +2903,26 @@ void ULocalCharacterComponent::RunKokoroSentenceToAudio(
         FScopeLock RequestLock(&SelectedEntry->RequestMutex);
         FLocalTtsWorkerState& WS = SelectedEntry->Worker;
 
+        // Drain complete stale JSON lines left by prior requests so they cannot attach to this one.
+        WS.StdoutBuffer += FLocalTalkerProcess::ReadAvailable(WS.Pipes.ReadPipe);
+        FString DroppedLine;
+        int32 DroppedCount = 0;
+        while (LocalTalkerTryPopLine(WS.StdoutBuffer, DroppedLine))
+        {
+            if (!DroppedLine.IsEmpty())
+            {
+                DroppedCount++;
+            }
+        }
+        if (DroppedCount > 0 && LocalTalkerShouldLogAudioTrace())
+        {
+            UE_LOG(LogLocalTalker, Warning, TEXT("%s[%s] Dropped %d stale Kokoro stdout lines before request '%s'."),
+                *LocalTalkerTimePrefix(this),
+                *GetSpeakerNameResolved(),
+                DroppedCount,
+                *ReqId);
+        }
+
         if (!FLocalTalkerProcess::WriteStdin(WS.Pipes, ReqLine))
         {
             OutErr = TEXT("Failed to write request to Kokoro worker stdin.");
@@ -2831,6 +2942,29 @@ void ULocalCharacterComponent::RunKokoroSentenceToAudio(
         int32 TotalStreamedBytes = 0;
         int32 ChunksReceived  = 0;
         bool  bDone           = false;
+        bool  bWarnedMissingReqIdForChunk = false;
+
+        auto ExtractRequestId = [](const TSharedPtr<FJsonObject>& MsgObj) -> FString
+        {
+            if (!MsgObj.IsValid())
+            {
+                return FString();
+            }
+
+            FString Id;
+            MsgObj->TryGetStringField(TEXT("request_id"), Id);
+            if (!Id.IsEmpty())
+            {
+                return Id;
+            }
+
+            const TSharedPtr<FJsonObject>* MetricsObj = nullptr;
+            if (MsgObj->TryGetObjectField(TEXT("metrics"), MetricsObj) && MetricsObj && MetricsObj->IsValid())
+            {
+                (*MetricsObj)->TryGetStringField(TEXT("request_id"), Id);
+            }
+            return Id;
+        };
 
         while (!bDone)
         {
@@ -2854,6 +2988,29 @@ void ULocalCharacterComponent::RunKokoroSentenceToAudio(
 
                     bool bIsChunk = false;
                     Parsed->TryGetBoolField(TEXT("streaming_chunk"), bIsChunk);
+                    const FString MessageReqId = ExtractRequestId(Parsed);
+
+                    if (bIsChunk && MessageReqId.IsEmpty())
+                    {
+                        if (!bWarnedMissingReqIdForChunk)
+                        {
+                            UE_LOG(LogLocalTalker, Warning,
+                                TEXT("%s[%s] Kokoro streaming chunk missing request_id; dropping to avoid cross-request audio mix."),
+                                *TimePrefix, *SpeakerLabel);
+                            bWarnedMissingReqIdForChunk = true;
+                        }
+                        continue;
+                    }
+                    if (!MessageReqId.IsEmpty() && MessageReqId != ReqId)
+                    {
+                        if (bTraceAudio)
+                        {
+                            UE_LOG(LogLocalTalker, Log,
+                                TEXT("%s[%s] Ignoring stale Kokoro message for req='%s' (expected '%s')."),
+                                *TimePrefix, *SpeakerLabel, *MessageReqId, *ReqId);
+                        }
+                        continue;
+                    }
 
                     if (bIsChunk)
                     {
@@ -2878,12 +3035,18 @@ void ULocalCharacterComponent::RunKokoroSentenceToAudio(
                             const int32 CapturedCh = StreamCh;
 
                             FEvent* WaveReady = FPlatformProcess::GetSynchEventFromPool(false);
-                            AsyncTask(ENamedThreads::GameThread, [this, &StreamWave, WaveReady, ChunkData = MoveTemp(ChunkBytes), CapturedSR, CapturedCh, SubtitleText, EstDuration, StreamingAlive]() mutable
+                            AsyncTask(ENamedThreads::GameThread, [WeakThis = TWeakObjectPtr<ULocalCharacterComponent>(this), &StreamWave, WaveReady, ChunkData = MoveTemp(ChunkBytes), CapturedSR, CapturedCh, SubtitleText, EstDuration, StreamingAlive, RequestEpoch, ReqId]() mutable
                             {
-                                EnsureAudio();
-                                if (!AudioComp) { WaveReady->Trigger(); return; }
+                                ULocalCharacterComponent* Owner = WeakThis.Get();
+                                if (!Owner || Owner->AudioRequestEpoch.GetValue() != RequestEpoch || Owner->bInterrupted)
+                                {
+                                    WaveReady->Trigger();
+                                    return;
+                                }
+                                Owner->EnsureAudio();
+                                if (!Owner->AudioComp) { WaveReady->Trigger(); return; }
 
-                                USoundWaveProcedural* Wave = NewObject<USoundWaveProcedural>(this, TEXT("LocalTalkerKokoroWave"));
+                                USoundWaveProcedural* Wave = NewObject<USoundWaveProcedural>(Owner, TEXT("LocalTalkerKokoroWave"));
                                 Wave->bLooping = false;
                                 Wave->Duration = INDEFINITELY_LOOPING_DURATION;
                                 Wave->SampleByteSize = sizeof(int16);
@@ -2907,11 +3070,12 @@ void ULocalCharacterComponent::RunKokoroSentenceToAudio(
 
                                 Wave->QueueAudio(ChunkData.GetData(), ChunkData.Num());
                                 StreamWave = Wave;
-                                PendingAudioWave = Wave;
-                                PendingSubtitleText = SubtitleText;
-                                PendingSubtitleDurationSeconds = EstDuration;
-                                bAudioPlaybackComplete = false;
-                                TryStartPendingAudio();
+                                Owner->QueuePendingAudioPayload(
+                                    Wave,
+                                    SubtitleText,
+                                    EstDuration,
+                                    ReqId,
+                                    RequestEpoch);
                                 WaveReady->Trigger();
                             });
                             WaveReady->Wait();
@@ -2970,22 +3134,25 @@ void ULocalCharacterComponent::RunKokoroSentenceToAudio(
                             TotalStreamedBytes = FallbackBytes.Num();
                             const float DurationSec = (StreamSR > 0) ? ((float)FallbackBytes.Num() / (float)(2 * StreamCh * StreamSR)) : 0.0f;
                             const FString SubtitleText = Sentence;
-                            AsyncTask(ENamedThreads::GameThread, [this, Bytes = MoveTemp(FallbackBytes), SR = StreamSR, Ch = StreamCh, DurationSec, SubtitleText]() mutable
+                            AsyncTask(ENamedThreads::GameThread, [WeakThis = TWeakObjectPtr<ULocalCharacterComponent>(this), Bytes = MoveTemp(FallbackBytes), SR = StreamSR, Ch = StreamCh, DurationSec, SubtitleText, RequestEpoch, ReqId]() mutable
                             {
-                                EnsureAudio();
-                                if (!AudioComp) return;
-                                USoundWaveProcedural* Wave = NewObject<USoundWaveProcedural>(this, TEXT("LocalTalkerKokoroProcWave"));
+                                ULocalCharacterComponent* Owner = WeakThis.Get();
+                                if (!Owner || Owner->AudioRequestEpoch.GetValue() != RequestEpoch || Owner->bInterrupted) return;
+                                Owner->EnsureAudio();
+                                if (!Owner->AudioComp) return;
+                                USoundWaveProcedural* Wave = NewObject<USoundWaveProcedural>(Owner, TEXT("LocalTalkerKokoroProcWave"));
                                 Wave->bLooping = false;
                                 Wave->Duration = INDEFINITELY_LOOPING_DURATION;
                                 Wave->SampleByteSize = sizeof(int16);
                                 Wave->NumChannels = Ch;
                                 Wave->SetSampleRate(SR);
                                 Wave->QueueAudio(Bytes.GetData(), Bytes.Num());
-                                PendingAudioWave = Wave;
-                                PendingSubtitleText = SubtitleText;
-                                PendingSubtitleDurationSeconds = DurationSec;
-                                bAudioPlaybackComplete = false;
-                                TryStartPendingAudio();
+                                Owner->QueuePendingAudioPayload(
+                                    Wave,
+                                    SubtitleText,
+                                    DurationSec,
+                                    ReqId,
+                                    RequestEpoch);
                             });
                         }
                         bDone = true;
@@ -3040,16 +3207,11 @@ void ULocalCharacterComponent::RunKokoroSentenceToAudio(
         // timer fallback fires at the right time, even when audio started while blocked.
         if (DurationSec > 0.0f)
         {
-            AsyncTask(ENamedThreads::GameThread, [WeakThis = TWeakObjectPtr<ULocalCharacterComponent>(this), DurationSec]()
+            AsyncTask(ENamedThreads::GameThread, [WeakThis = TWeakObjectPtr<ULocalCharacterComponent>(this), DurationSec, ReqId, RequestEpoch]()
             {
                 ULocalCharacterComponent* Owner = WeakThis.Get();
-                if (!Owner || Owner->bAudioPlaybackComplete) return;
-                Owner->PendingSubtitleDurationSeconds = DurationSec;
-                // If playback has already started, patch the live timer too.
-                if (Owner->ActiveAudioStartWorldSeconds > 0.0 && Owner->ActiveAudioDurationSeconds > 0.0f)
-                {
-                    Owner->ActiveAudioDurationSeconds = DurationSec;
-                }
+                if (!Owner) return;
+                Owner->ApplyAudioDurationForRequest(ReqId, DurationSec, RequestEpoch);
             });
         }
 

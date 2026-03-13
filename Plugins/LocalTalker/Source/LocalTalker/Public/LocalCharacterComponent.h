@@ -22,6 +22,24 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FLocalCharacterTokenEvent, const FSt
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FLocalCharacterSubtitleEvent, const FString&, Speaker, const FString&, Text);
 DECLARE_MULTICAST_DELEGATE_TwoParams(FLocalCharacterSubtitleNativeEvent, const FString& /*Speaker*/, const FString& /*Text*/);
 
+USTRUCT()
+struct FLocalTalkPendingAudioPayload
+{
+    GENERATED_BODY()
+
+    UPROPERTY()
+    TObjectPtr<USoundWaveProcedural> Wave = nullptr;
+
+    UPROPERTY()
+    FString SubtitleText;
+
+    UPROPERTY()
+    float SubtitleDurationSeconds = 0.0f;
+
+    UPROPERTY()
+    FString RequestId;
+};
+
 /**
  * An "Actor" in the conversation. Handles individual character speech and listens for others.
  */
@@ -260,16 +278,32 @@ private:
     // Pending playback (waiting for another speaker to finish).
     UPROPERTY()
     USoundWaveProcedural* PendingAudioWave = nullptr;
+    FString PendingAudioRequestId;
     FString PendingSubtitleText;
     float PendingSubtitleDurationSeconds = 0.0f;
+    UPROPERTY()
+    TArray<FLocalTalkPendingAudioPayload> PendingAudioPayloads;
+    FString ActiveAudioRequestId;
     double ActiveAudioStartWorldSeconds = 0.0;
     float ActiveAudioDurationSeconds = 0.0f;
+    FThreadSafeCounter AudioRequestEpoch;
 
     // Tracks whether this speaker is queued behind another (event-driven, not polled).
     bool bWaitingForOtherSpeaker = false;
     double BlockedSinceSeconds = 0.0;
 
     void EnsureAudio();
+    void ResetPendingAudioState();
+    void QueuePendingAudioPayload(
+        USoundWaveProcedural* Wave,
+        const FString& SubtitleText,
+        float SubtitleDurationSeconds,
+        const FString& RequestId,
+        int32 RequestEpoch);
+    void ApplyAudioDurationForRequest(
+        const FString& RequestId,
+        float DurationSeconds,
+        int32 RequestEpoch);
     void StartTTSWorker(const FLocalTalkerRuntimePaths& Paths);
     void StopTTSWorker();
     void EnqueueSentence(const FString& Sentence);
