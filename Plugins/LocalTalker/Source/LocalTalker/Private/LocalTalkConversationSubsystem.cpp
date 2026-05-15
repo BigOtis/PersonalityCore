@@ -996,6 +996,21 @@ void ULocalTalkConversationSubsystem::ProcessTurns()
     const double Now = W ? (double)W->GetTimeSeconds() : 0.0;
     const ULocalTalkerSettings* S = GetDefault<ULocalTalkerSettings>();
     const bool bRequireListenerAll = S ? S->bRequirePlayerListenerForAllTalk : false;
+    const int32 MaxConcurrentNpcTurns = S ? FMath::Clamp(S->MaxConcurrentNpcTurns, 1, 8) : 2;
+
+    auto CountActiveNpcTurns = [this]() -> int32
+    {
+        int32 Count = 0;
+        for (const TWeakObjectPtr<ULocalCharacterComponent>& Weak : Registry)
+        {
+            const ULocalCharacterComponent* Talker = Weak.Get();
+            if (Talker && Talker->IsBusy())
+            {
+                ++Count;
+            }
+        }
+        return Count;
+    };
 
     // Handle manual requests (e.g. Player interaction or scripted events)
     for (int32 i = 0; i < ManualQueue.Num(); i++)
@@ -1033,6 +1048,20 @@ void ULocalTalkConversationSubsystem::ProcessTurns()
         }
         else if (T->IsBusy())
         {
+            continue;
+        }
+
+        if (!ManualQueue[i].bFromUser && CountActiveNpcTurns() >= MaxConcurrentNpcTurns)
+        {
+            if (Now >= NextNpcConcurrencyBlockedLogWorldSeconds)
+            {
+                NextNpcConcurrencyBlockedLogWorldSeconds = Now + 1.0;
+                UE_LOG(LogLocalTalker, Log,
+                    TEXT("%s[Director] Deferring NPC turn for '%s' due to global NPC concurrency cap (%d)."),
+                    *LocalTalkerTimePrefixSubsystem(this),
+                    *T->GetSpeakerNameResolved(),
+                    MaxConcurrentNpcTurns);
+            }
             continue;
         }
 

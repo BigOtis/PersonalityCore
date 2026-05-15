@@ -674,12 +674,12 @@ bool FAutoChatVoiceInputLowGainFallbackStartTest::RunTest(const FString& Paramet
     TArray<float> LowGainChunk;
     LowGainChunk.Init(0.012f, NumFrames * NumChannels);
 
-    for (int32 i = 0; i < 9 && !VoiceComp->Test_IsAlwaysOnSegmentActive(); ++i)
+    for (int32 i = 0; i < 24 && !VoiceComp->Test_IsAlwaysOnSegmentActive(); ++i)
     {
         VoiceComp->Test_ProcessAlwaysOnChunk(LowGainChunk.GetData(), NumFrames, NumChannels, SampleRate, 0.012f);
     }
 
-    TestTrue(TEXT("Low-gain sustained speech should trigger fallback segment start."), VoiceComp->Test_IsAlwaysOnSegmentActive());
+    TestTrue(TEXT("Low-gain sustained speech should still trigger fallback segment start after the longer hold."), VoiceComp->Test_IsAlwaysOnSegmentActive());
 
     PlayerActor->Destroy();
     return true;

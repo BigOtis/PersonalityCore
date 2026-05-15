@@ -1474,13 +1474,13 @@ void UAutoChatVoiceInputComponent::ProcessAlwaysOnAutoTranscribe(const float* Au
             AutoTranscribeContinueRmsThreshold * 0.55f,
             AutoTranscribeStartRmsThreshold * 0.35f));
     const float AdaptiveFallbackStartRms = bUseAdaptiveNoiseFloor
-        ? (AdaptiveNoiseFloorRms * 1.20f + 0.0005f)
+        ? (AdaptiveNoiseFloorRms * 1.55f + 0.0025f)
         : 0.0f;
     const float FallbackStartRms = FMath::Clamp(
         FMath::Min(EffectiveStartRms, FMath::Max(LowGainStartRms, AdaptiveFallbackStartRms)),
         0.0085f,
         EffectiveStartRms);
-    const float FallbackStartHoldSeconds = FMath::Max(0.28f, AutoTranscribeStartHoldSeconds * 2.5f);
+    const float FallbackStartHoldSeconds = FMath::Max(0.45f, AutoTranscribeStartHoldSeconds * 3.0f);
     const float LoudRmsBase = bUseAdaptiveNoiseFloor
         ? FMath::Max(BargeInMinRmsThreshold, AdaptiveNoiseFloorRms * FMath::Max(1.0f, AdaptiveBargeInThresholdMultiplier) + 0.004f)
         : BargeInMinRmsThreshold;
@@ -1695,12 +1695,14 @@ void UAutoChatVoiceInputComponent::ProcessAlwaysOnAutoTranscribe(const float* Au
         const double ActiveRatioNow = (AutoSpeechTotalFrames > 0)
             ? ((double)AutoSpeechActiveFrames / (double)AutoSpeechTotalFrames)
             : 0.0;
+        const double SegmentSecondsNow = Now - AutoSpeechStartWorldSeconds;
 
-        const double MinActiveForPriority = (double)FMath::Max(0.18f, AutoTranscribeMinActiveSpeechSeconds * 0.75f);
-        const double MinRatioForPriority = (double)FMath::Max(0.35f, AutoTranscribeMinActiveRatio * 0.90f);
+        const double MinActiveForPriority = (double)FMath::Max(0.45f, AutoTranscribeMinActiveSpeechSeconds * 1.10f);
+        const double MinRatioForPriority = (double)FMath::Max(0.58f, AutoTranscribeMinActiveRatio * 1.05f);
         const bool bLikelyHumanSpeechNow =
-            (ActiveSpeechSecondsNow >= MinActiveForPriority) ||
-            ((AutoSpeechTotalFrames >= FMath::Max(1, AutoSpeechSampleRate / 2)) && (ActiveRatioNow >= MinRatioForPriority));
+            (SegmentSecondsNow >= 0.35) &&
+            (ActiveSpeechSecondsNow >= MinActiveForPriority) &&
+            (ActiveRatioNow >= MinRatioForPriority);
 
         if (ActiveSegmentPriorityHoldSeconds > 0.0f && bLikelyHumanSpeechNow)
         {

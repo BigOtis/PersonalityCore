@@ -86,15 +86,15 @@ public:
 
     /** RMS threshold to start a speech segment in always-on mode. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.001", ClampMax="1.0"))
-    float AutoTranscribeStartRmsThreshold = 0.032f;
+    float AutoTranscribeStartRmsThreshold = 0.040f;
 
     /** RMS threshold to continue speech segment in always-on mode. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.001", ClampMax="1.0"))
-    float AutoTranscribeContinueRmsThreshold = 0.020f;
+    float AutoTranscribeContinueRmsThreshold = 0.026f;
 
     /** Speech must remain above start threshold for this long before an always-on segment starts. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.01", ClampMax="2.0"))
-    float AutoTranscribeStartHoldSeconds = 0.10f;
+    float AutoTranscribeStartHoldSeconds = 0.18f;
 
     /** Silence time required to end speech segment and trigger transcription. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.10", ClampMax="3.0"))
@@ -110,11 +110,11 @@ public:
 
     /** Require at least this much speech-active audio inside a segment before sending to Whisper. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.01", ClampMax="5.0"))
-    float AutoTranscribeMinActiveSpeechSeconds = 0.30f;
+    float AutoTranscribeMinActiveSpeechSeconds = 0.45f;
 
     /** Minimum speech-active ratio for a segment to be considered voice rather than impulse/background noise. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.01", ClampMax="1.0"))
-    float AutoTranscribeMinActiveRatio = 0.35f;
+    float AutoTranscribeMinActiveRatio = 0.50f;
 
     /** If true, apply a speech fence immediately when always-on segment starts. Keep off to avoid noise suppressing AI. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice")
@@ -145,21 +145,21 @@ public:
 
     /** Dynamic threshold multipliers applied to noise floor estimate. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="1.0", ClampMax="8.0"))
-    float AdaptiveStartThresholdMultiplier = 2.8f;
+    float AdaptiveStartThresholdMultiplier = 3.4f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="1.0", ClampMax="8.0"))
-    float AdaptiveContinueThresholdMultiplier = 2.0f;
+    float AdaptiveContinueThresholdMultiplier = 2.4f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="1.0", ClampMax="10.0"))
-    float AdaptiveBargeInThresholdMultiplier = 4.0f;
+    float AdaptiveBargeInThresholdMultiplier = 4.8f;
 
     /** Upper bound for effective adaptive start threshold so speech cannot get fully locked out in noisy scenes. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.020", ClampMax="0.30"))
-    float MaxEffectiveStartRmsThreshold = 0.060f;
+    float MaxEffectiveStartRmsThreshold = 0.075f;
 
     /** Upper bound for effective adaptive continue threshold (kept below start to maintain hysteresis). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.010", ClampMax="0.30"))
-    float MaxEffectiveContinueRmsThreshold = 0.035f;
+    float MaxEffectiveContinueRmsThreshold = 0.050f;
 
     /** Seconds to keep Director-level player priority active after a loud barge-in interrupt. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.25", ClampMax="20.0"))
@@ -167,15 +167,15 @@ public:
 
     /** Seconds to keep player priority active after an always-on segment is sent to Whisper. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.25", ClampMax="30.0"))
-    float PostSegmentPriorityHoldSeconds = 8.0f;
+    float PostSegmentPriorityHoldSeconds = 3.0f;
 
     /** While always-on capture is actively hearing speech, hold short player priority so NPC turns don't race ahead of pending transcript context. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.0", ClampMax="12.0"))
-    float ActiveSegmentPriorityHoldSeconds = 2.0f;
+    float ActiveSegmentPriorityHoldSeconds = 0.75f;
 
     /** Refresh cadence for active-segment player priority hold (lower keeps tighter suppression during speech). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.10", ClampMax="5.0"))
-    float ActiveSegmentPriorityRefreshSeconds = 0.80f;
+    float ActiveSegmentPriorityRefreshSeconds = 0.60f;
 
     /** Seconds to keep player priority active when a transcript is submitted to nearby AI. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="0.25", ClampMax="20.0"))
@@ -183,7 +183,7 @@ public:
 
     /** Hard fence max hold while player speech is being captured/transcribed (failsafe timeout). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Voice", meta=(ClampMin="2.0", ClampMax="120.0"))
-    float PlayerSpeechFenceMaxSeconds = 30.0f;
+    float PlayerSpeechFenceMaxSeconds = 8.0f;
 
     /** Selected mic mode for player input. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="AutoChat|Microphone")

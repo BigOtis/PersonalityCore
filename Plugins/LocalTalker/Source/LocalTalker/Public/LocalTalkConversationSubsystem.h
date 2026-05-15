@@ -167,6 +167,7 @@ private:
     float PlayerSpeechPriorityRadius = 0.0f;
     double PlayerSpeechPriorityUntilWorldSeconds = 0.0;
     double NextPlayerPriorityBlockedLogWorldSeconds = 0.0;
+    double NextNpcConcurrencyBlockedLogWorldSeconds = 0.0;
 
     bool bPlayerSpeechFenceActive = false;
     FVector PlayerSpeechFenceCenter = FVector::ZeroVector;

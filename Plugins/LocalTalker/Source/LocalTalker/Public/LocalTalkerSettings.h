@@ -90,6 +90,11 @@ public:
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Conversation", meta=(ClampMin="0"))
     int32 MaxConsecutiveNpcTurns = 6;
 
+    // Global cap for simultaneous NPC turns across the whole level.
+    // Keeps large ambient scenes from cold-starting too many booth conversations at once.
+    UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Conversation", meta=(ClampMin="1", ClampMax="8"))
+    int32 MaxConcurrentNpcTurns = 2;
+
     // If enabled, NPC-to-NPC auto conversation will only run while at least one local player pawn
     // is within hearing range of the conversation participants.
     UPROPERTY(Config, EditAnywhere, BlueprintReadOnly, Category="Conversation")
