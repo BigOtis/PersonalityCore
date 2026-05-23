@@ -16,88 +16,15 @@ The project combines a reusable `LocalTalker` plugin with game-specific systems 
 
 ## System at a glance
 
-```mermaid
-flowchart LR
-    Player["Player microphone"] --> Voice["AutoChatVoiceInputComponent<br/>always-on capture, barge-in, transcript filters"]
-    Voice --> Whisper["LocalPlayerInteractionComponent<br/>Whisper STT worker"]
-    Whisper --> Director["LocalTalkConversationSubsystem<br/>proximity contexts + turn director"]
-
-    subgraph LocalTalker["LocalTalker plugin"]
-        Director --> Character["LocalCharacterComponent<br/>prompt building + streaming dialogue"]
-        Character --> LLM["llama.cpp<br/>local GGUF model"]
-        LLM --> Character
-        Character --> TTS["Kokoro TTS worker"]
-        TTS --> Audio["Procedural audio + subtitles"]
-    end
-
-    Audio --> NPC["Nearby NPCs"]
-    NPC --> Director
-    Director --> Scene["Conversation history<br/>auto replies + keep-alive chatter"]
-    Scene --> Character
-```
+![System at a glance](docs/readme/system-at-a-glance.svg)
 
 ## Live conversation flow
 
-```mermaid
-sequenceDiagram
-    participant P as Player
-    participant V as Voice Input
-    participant W as Whisper STT
-    participant D as Conversation Director
-    participant C as NPC Character
-    participant L as llama.cpp
-    participant T as Kokoro TTS
-
-    P->>V: Speaks near a booth
-    V->>V: Detect speech, suppress noisy/echo-like segments
-    V->>W: Submit captured PCM audio
-    W-->>V: Transcript
-    V->>D: Route recognized speech to nearest or nearby NPCs
-    D->>D: Record user line, prioritize player turn
-    D->>C: Grant turn
-    C->>L: Build prompt from persona + local history
-    L-->>C: Stream generated text
-    C->>T: Chunk sentences for synthesis
-    T-->>C: Speech audio
-    C-->>P: Play voice + subtitles
-    C->>D: Broadcast spoken line
-    D->>D: Pick next speaker or pause
-```
+![Live conversation flow](docs/readme/live-conversation-flow.svg)
 
 ## Core architecture
 
-```mermaid
-flowchart TB
-    subgraph Game["AutoChat game module"]
-        VoiceInput["UAutoChatVoiceInputComponent"]
-        BotDirector["UConventionBotSubsystem"]
-        DemoScene["Convention expo scene"]
-    end
-
-    subgraph Plugin["LocalTalker plugin"]
-        Conversation["ULocalTalkConversationSubsystem"]
-        Character["ULocalCharacterComponent"]
-        PlayerBridge["ULocalPlayerInteractionComponent"]
-        Settings["ULocalTalkerSettings"]
-    end
-
-    subgraph LocalAI["Local AI runtimes"]
-        Whisper["Whisper / faster-whisper"]
-        Llama["llama.cpp"]
-        Kokoro["Kokoro ONNX TTS"]
-    end
-
-    VoiceInput --> PlayerBridge
-    PlayerBridge --> Whisper
-    VoiceInput --> Conversation
-    Conversation --> Character
-    Character --> Llama
-    Character --> Kokoro
-    Settings --> Character
-    Settings --> PlayerBridge
-    BotDirector --> DemoScene
-    BotDirector --> Character
-```
+![Core architecture](docs/readme/core-architecture.svg)
 
 ## Main pieces
 

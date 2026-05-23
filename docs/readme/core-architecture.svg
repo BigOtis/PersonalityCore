@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 390" width="100%" height="100%">
+    <defs>
+        <style>
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&amp;display=swap');
+            text { font-family: 'Inter', sans-serif; fill: #e0e0e0; font-size: 14px; }
+            .title { font-weight: 600; font-size: 16px; fill: #ffffff; }
+            .subtitle { font-size: 12px; fill: #a0a0a0; }
+            .box { fill: #252526; stroke: #3e3e42; stroke-width: 2; rx: 8; ry: 8; }
+            .box-highlight { fill: #2d2d30; stroke: #007acc; stroke-width: 2; rx: 8; ry: 8; }
+            .subgraph { fill: rgba(255, 255, 255, 0.02); stroke: #454545; stroke-width: 1; stroke-dasharray: 5,5; rx: 12; ry: 12; }
+            .edge { fill: none; stroke: #6b6b6b; stroke-width: 2; stroke-linejoin: round; }
+            .edge-animated { fill: none; stroke: #00aaff; stroke-width: 2; stroke-dasharray: 8,8; animation: flow 1s linear infinite; stroke-linejoin: round; }
+            .edge-animated-reverse { fill: none; stroke: #00aaff; stroke-width: 2; stroke-dasharray: 8,8; animation: flow-reverse 1s linear infinite; stroke-linejoin: round; }
+            @keyframes flow { from { stroke-dashoffset: 16; } to { stroke-dashoffset: 0; } }
+            @keyframes flow-reverse { from { stroke-dashoffset: 0; } to { stroke-dashoffset: 16; } }
+            .arrow { fill: #6b6b6b; }
+            .arrow-animated { fill: #00aaff; }
+            .icon { fill: #00aaff; }
+            
+            /* Sequence diagram specific */
+            .seq-line { stroke: #3e3e42; stroke-width: 2; stroke-dasharray: 4,4; }
+            .seq-box { fill: #252526; stroke: #007acc; stroke-width: 2; rx: 4; ry: 4; }
+            .seq-msg { fill: none; stroke: #00aaff; stroke-width: 2; }
+            .seq-msg-text { font-size: 12px; fill: #d4d4d4; }
+            .seq-msg-anim { stroke-dasharray: 1000; stroke-dashoffset: 1000; animation: draw 2s ease forwards infinite; }
+            @keyframes draw { to { stroke-dashoffset: 0; } }
+            
+            /* Architecture specific */
+            .arch-group { fill: #1e1e1e; stroke: #333; stroke-width: 2; rx: 10; ry: 10; }
+            .arch-group-title { font-weight: 600; font-size: 18px; fill: #888; }
+            .arch-node { fill: #252526; stroke: #555; stroke-width: 2; rx: 6; ry: 6; transition: all 0.3s ease; }
+            .arch-node:hover { stroke: #00aaff; transform: translateY(-2px); }
+        </style>
+        <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="arrow" />
+        </marker>
+        <marker id="arrowhead-anim" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="arrow-animated" />
+        </marker>
+    </defs>
+    <rect width="100%" height="100%" fill="#181818" rx="12" ry="12" />
+    <rect x="30" y="40" width="320" height="300" class="arch-group" />
+<text x="190" y="70" text-anchor="middle" class="arch-group-title">AutoChat game module</text>
+<rect x="390" y="40" width="340" height="340" class="arch-group" />
+<text x="560" y="70" text-anchor="middle" class="arch-group-title">LocalTalker plugin</text>
+<rect x="760" y="40" width="300" height="300" class="arch-group" />
+<text x="910" y="70" text-anchor="middle" class="arch-group-title">Local AI runtimes</text>
+<rect x="50" y="100" width="280" height="50" class="box" />
+<text x="190.0" y="130.0" text-anchor="middle" class="title">AutoChatVoiceInputComponent</text>
+<rect x="50" y="180" width="280" height="50" class="box" />
+<text x="190.0" y="210.0" text-anchor="middle" class="title">ConventionBotSubsystem</text>
+<rect x="50" y="260" width="280" height="50" class="box" />
+<text x="190.0" y="290.0" text-anchor="middle" class="title">Convention expo scene</text>
+<rect x="420" y="100" width="280" height="50" class="box" />
+<text x="560.0" y="130.0" text-anchor="middle" class="title">LocalPlayerInteractionComponent</text>
+<rect x="420" y="170" width="280" height="50" class="box" />
+<text x="560.0" y="200.0" text-anchor="middle" class="title">LocalTalkConversationSubsystem</text>
+<rect x="420" y="240" width="280" height="50" class="box" />
+<text x="560.0" y="270.0" text-anchor="middle" class="title">LocalCharacterComponent</text>
+<rect x="420" y="310" width="280" height="50" class="box" />
+<text x="560.0" y="340.0" text-anchor="middle" class="title">LocalTalkerSettings</text>
+<rect x="790" y="100" width="240" height="50" class="box" />
+<text x="910.0" y="130.0" text-anchor="middle" class="title">Whisper / faster-whisper</text>
+<rect x="790" y="180" width="240" height="50" class="box" />
+<text x="910.0" y="210.0" text-anchor="middle" class="title">llama.cpp</text>
+<rect x="790" y="260" width="240" height="50" class="box" />
+<text x="910.0" y="290.0" text-anchor="middle" class="title">Kokoro ONNX TTS</text>
+<line x1="330" y1="125" x2="410.0" y2="125.0" class="edge-animated" marker-end="url(#arrowhead-anim)" />
+<line x1="700" y1="125" x2="780.0" y2="125.0" class="edge-animated" marker-end="url(#arrowhead-anim)" />
+<path d="M 330 125 C 370.0 125, 370.0 195, 410 195" class="edge-animated" marker-end="url(#arrowhead-anim)" fill="none" />
+<line x1="560" y1="220" x2="560.0" y2="230.0" class="edge-animated" marker-end="url(#arrowhead-anim)" />
+<path d="M 700 255 C 740.0 255, 740.0 205, 780 205" class="edge-animated" marker-end="url(#arrowhead-anim)" fill="none" />
+<path d="M 700 275 C 740.0 275, 740.0 285, 780 285" class="edge-animated" marker-end="url(#arrowhead-anim)" fill="none" />
+<line x1="560" y1="310" x2="560.0" y2="300.0" class="edge-animated" marker-end="url(#arrowhead-anim)" />
+<path d="M 420 335 C 360 335, 360 125, 410 125" class="edge-animated" marker-end="url(#arrowhead-anim)" fill="none" />
+<line x1="190" y1="230" x2="190.0" y2="250.0" class="edge-animated" marker-end="url(#arrowhead-anim)" />
+<path d="M 330 205 C 370.0 205, 370.0 265, 410 265" class="edge-animated" marker-end="url(#arrowhead-anim)" fill="none" />
+
+</svg>
