@@ -1,0 +1,217 @@
+{
+  "$defs": {
+    "CharacterCreate": {
+      "properties": {
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "personality": {
+          "default": "",
+          "title": "Personality",
+          "type": "string"
+        },
+        "instructions": {
+          "default": "",
+          "title": "Instructions",
+          "type": "string"
+        },
+        "provider_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Id"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "temperature": {
+          "anyOf": [
+            {
+              "maximum": 2,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Temperature"
+        },
+        "voice": {
+          "$ref": "#/$defs/VoiceSettings"
+        },
+        "color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Color"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "CharacterCreate",
+      "type": "object"
+    },
+    "SceneMember": {
+      "properties": {
+        "key": {
+          "maxLength": 60,
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "title": "Key",
+          "type": "string"
+        },
+        "character": {
+          "$ref": "#/$defs/CharacterCreate"
+        },
+        "character_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Character Id"
+        },
+        "public_description": {
+          "default": "",
+          "maxLength": 1200,
+          "title": "Public Description",
+          "type": "string"
+        },
+        "backstory": {
+          "default": "",
+          "maxLength": 4000,
+          "title": "Backstory",
+          "type": "string"
+        },
+        "relationships": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Relationships",
+          "type": "object"
+        }
+      },
+      "required": [
+        "key",
+        "character"
+      ],
+      "title": "SceneMember",
+      "type": "object"
+    },
+    "VoiceSettings": {
+      "properties": {
+        "voice_id": {
+          "default": "af_bella",
+          "title": "Voice Id",
+          "type": "string"
+        },
+        "speed": {
+          "default": 1.0,
+          "maximum": 2.0,
+          "minimum": 0.5,
+          "title": "Speed",
+          "type": "number"
+        },
+        "language": {
+          "default": "en-us",
+          "title": "Language",
+          "type": "string"
+        }
+      },
+      "title": "VoiceSettings",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "name": {
+      "maxLength": 100,
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "goal": {
+      "default": "Have a useful conversation.",
+      "maxLength": 6000,
+      "title": "Goal",
+      "type": "string"
+    },
+    "guidance": {
+      "default": "Keep each turn to one or two short sentences.",
+      "maxLength": 6000,
+      "title": "Guidance",
+      "type": "string"
+    },
+    "members": {
+      "items": {
+        "$ref": "#/$defs/SceneMember"
+      },
+      "maxItems": 12,
+      "minItems": 2,
+      "title": "Members",
+      "type": "array"
+    },
+    "context": {
+      "additionalProperties": true,
+      "title": "Context",
+      "type": "object"
+    },
+    "join_policy": {
+      "default": "open",
+      "enum": [
+        "open",
+        "invite",
+        "ignore"
+      ],
+      "title": "Join Policy",
+      "type": "string"
+    },
+    "autonomous_turns": {
+      "default": 6,
+      "maximum": 30,
+      "minimum": 0,
+      "title": "Autonomous Turns",
+      "type": "integer"
+    },
+    "greet_on_join": {
+      "default": true,
+      "title": "Greet On Join",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "name",
+    "members"
+  ],
+  "title": "SceneDefinition",
+  "type": "object"
+}

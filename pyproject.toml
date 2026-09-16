@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "localtalker"
+version = "0.1.0"
+description = "Local-first conversational AI runtime for games and interactive experiences."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "LocalTalker" }]
+license = { text = "MIT" }
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "pydantic>=2.10",
+  "pydantic-settings>=2.6",
+  "httpx>=0.27",
+  "openai>=1.57",
+  "aiosqlite>=0.20",
+  "orjson>=3.10",
+  "huggingface_hub>=0.26",
+  "numpy>=1.26",
+  "scipy>=1.12",
+  "soundfile>=0.12",
+  "onnxruntime>=1.20",
+  "faster-whisper>=1.1",
+  "kokoro-onnx>=0.4",
+  "websockets>=14.0",
+]
+
+[project.optional-dependencies]
+packaging = ["pyinstaller>=6.22"]
+gpu = ["onnxruntime-gpu>=1.20"]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "httpx>=0.27",
+]
+
+[project.scripts]
+localtalker = "localtalker.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+  "smoke: real local models / GPU; skip in CI unless LOCALTALKER_SMOKE=1",
+  "e2e: full application flow against a live runtime",
+]
+filterwarnings = [
+  "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"

@@ -1,0 +1,144 @@
+{
+  "properties": {
+    "type": {
+      "enum": [
+        "text",
+        "audio",
+        "end_audio",
+        "interrupt",
+        "playback_done",
+        "presence",
+        "join",
+        "leave",
+        "direct",
+        "continue",
+        "pause",
+        "ping",
+        "speak",
+        "reset"
+      ],
+      "title": "Type",
+      "type": "string"
+    },
+    "text": {
+      "default": "",
+      "maxLength": 32000,
+      "title": "Text",
+      "type": "string"
+    },
+    "target": {
+      "default": "all",
+      "title": "Target",
+      "type": "string"
+    },
+    "player_name": {
+      "default": "Visitor",
+      "maxLength": 100,
+      "title": "Player Name",
+      "type": "string"
+    },
+    "present": {
+      "default": true,
+      "title": "Present",
+      "type": "boolean"
+    },
+    "pcm16_b64": {
+      "default": "",
+      "maxLength": 11000000,
+      "title": "Pcm16 B64",
+      "type": "string"
+    },
+    "sample_rate": {
+      "default": 16000,
+      "maximum": 192000,
+      "minimum": 8000,
+      "title": "Sample Rate",
+      "type": "integer"
+    },
+    "channels": {
+      "default": 1,
+      "maximum": 2,
+      "minimum": 1,
+      "title": "Channels",
+      "type": "integer"
+    },
+    "turn_id": {
+      "default": "",
+      "title": "Turn Id",
+      "type": "string"
+    },
+    "goal": {
+      "anyOf": [
+        {
+          "maxLength": 6000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Goal"
+    },
+    "guidance": {
+      "anyOf": [
+        {
+          "maxLength": 6000,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Guidance"
+    },
+    "join_policy": {
+      "anyOf": [
+        {
+          "enum": [
+            "open",
+            "invite",
+            "ignore"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Join Policy"
+    },
+    "turns": {
+      "default": 4,
+      "maximum": 30,
+      "minimum": 1,
+      "title": "Turns",
+      "type": "integer"
+    },
+    "context": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Context"
+    },
+    "stop": {
+      "default": true,
+      "title": "Stop",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "type"
+  ],
+  "title": "SceneCommand",
+  "type": "object"
+}

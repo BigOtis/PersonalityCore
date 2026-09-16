@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+<title id="title">LocalTalker</title><desc id="desc">Local voices. Living characters. A conversational AI foundation for games.</desc>
+<rect width="1200" height="360" rx="24" fill="#12110f"/>
+<path d="M76 80h150a28 28 0 0 1 28 28v100a28 28 0 0 1-28 28h-78l-45 38v-38H76a28 28 0 0 1-28-28V108a28 28 0 0 1 28-28" fill="#e3a85d"/>
+<g stroke="#12110f" stroke-width="10" stroke-linecap="round"><path d="M89 145v25m30-43v62m30-82v102m30-82v62m30-44v25"/></g>
+<text x="305" y="158" fill="#f0f5f5" font-family="Segoe UI,Arial,sans-serif" font-size="76" font-weight="700">LocalTalker</text>
+<text x="309" y="218" fill="#e3a85d" font-family="Segoe UI,Arial,sans-serif" font-size="29">Local voices. Living characters.</text>
+<text x="309" y="275" fill="#afa58f" font-family="Segoe UI,Arial,sans-serif" font-size="21">A conversational AI foundation for games.</text>
+</svg>

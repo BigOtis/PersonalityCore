@@ -1,5 +1,0 @@
-# Kokoro ONNX TTS worker dependencies
-# No PyTorch or CUDA required -- runs entirely on CPU via ONNX Runtime.
-# Install with: pip install -r requirements-kokoro-tts.txt
-kokoro-onnx>=0.5.0,<0.6.0
-numpy>=1.24.0

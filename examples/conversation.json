@@ -1,0 +1,10 @@
+{
+  "name": "LocalTalker conversation example",
+  "goal": "Help the visitor learn about the workshop.",
+  "autonomous_turns": 0,
+  "greet_on_join": false,
+  "members": [
+    {"key": "guide", "character": {"name": "Guide", "instructions": "Answer briefly. Propose only actions supported by the host."}},
+    {"key": "assistant", "character": {"name": "Assistant", "instructions": "Offer concise practical suggestions when addressed."}}
+  ]
+}

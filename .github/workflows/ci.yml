@@ -1,0 +1,28 @@
+name: Framework checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: python -m venv .venv
+      - run: .\.venv\Scripts\python.exe -m pip install -e '.[dev]'
+      - run: .\.venv\Scripts\python.exe -m pytest tests/unit tests/integration -q
+      - run: npm ci
+        working-directory: app
+      - run: npm run build
+        working-directory: app
+      - run: npx playwright install chromium
+        working-directory: app
+      - run: npm run test:e2e
+        working-directory: app

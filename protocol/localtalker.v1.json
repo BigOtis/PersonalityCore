@@ -1,0 +1,17 @@
+{
+  "name": "LocalTalker host protocol",
+  "version": "0.1.0",
+  "http": {
+    "health": "GET /v1/health",
+    "status": "GET /v1/status",
+    "characters": "GET|POST /v1/characters",
+    "sessions": "GET|POST /v1/sessions",
+    "turn": "POST /v1/sessions/{id}/turns",
+    "context": "POST /v1/sessions/{id}/context",
+    "voices": "GET /v1/voices",
+    "providers": "GET /v1/providers"
+  },
+  "websocket": "/v1/sessions/{id}/live",
+  "client_events": ["text", "audio", "end_audio", "interrupt", "set_context", "ping"],
+  "server_events": ["ready", "state", "user_message", "transcript", "token", "dialogue", "audio", "reply", "error", "warning", "cancelled", "pong"]
+}

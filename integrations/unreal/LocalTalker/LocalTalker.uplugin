@@ -1,0 +1,23 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.2.0",
+  "FriendlyName": "LocalTalker",
+  "Description": "Engine-neutral local AI scenes, characters, voice and turn taking.",
+  "Category": "AI",
+  "CreatedBy": "LocalTalker",
+  "CanContainContent": true,
+  "Modules": [
+    {
+      "Name": "LocalTalker",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ],
+  "Plugins": [
+    {
+      "Name": "AudioCapture",
+      "Enabled": true
+    }
+  ]
+}

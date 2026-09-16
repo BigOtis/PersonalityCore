@@ -1,109 +1,113 @@
-# AutoChat
+<p align="center"><img src="docs/assets/localtalker.svg" alt="LocalTalker — Local voices. Living characters." width="880"></p>
 
-![AutoChat hero banner](docs/readme/autochat-hero.jpg)
+<p align="center"><strong>A local conversational AI foundation for games.</strong><br>Characters, language models, speech, memory, and structured gameplay requests through one engine-independent runtime.</p>
 
-AutoChat is an Unreal Engine 5.7 project for **fully local, voice-driven NPC conversations**. A player can speak naturally into a microphone, nearby characters transcribe the speech, reason over local conversation history, answer with on-device language generation, and speak back with synthesized voices while the scene keeps moving around them.
+<p align="center"><a href="https://github.com/BigOtis/LocalTalker/releases">Windows demo</a> · <a href="#quick-start">Quick start</a> · <a href="integrations/unreal/README.md">Unreal Engine</a> · <a href="integrations/unity/README.md">Unity integration</a> · <a href="docs/integration.md">Protocol</a></p>
 
-The project combines a reusable `LocalTalker` plugin with game-specific systems for always-on voice input and a convention-floor demo scene. The result is a compact showcase of realtime AI orchestration inside Unreal: speech capture, turn arbitration, local inference, streaming audio, spatial context, and ambient NPC behavior all working together in one loop.
+LocalTalker gives your game a consistent way to talk to local language models. Send player speech or text alongside the world state. Receive a voiced character response plus structured proposals for actions, emotions, animations, and state changes. Your game remains in charge of what actually happens.
 
-## Why it is interesting
+The **Windows character studio** is the standalone demo and reference client: create characters, choose local models and voices, hold a key to speak, and try conversations with one character or a group. No game project is needed.
 
-- **Runs locally:** in-process `llama.cpp` generation, local Whisper speech-to-text, and local Kokoro text-to-speech.
-- **Conversation-aware:** NPCs are grouped into proximity-based contexts with rolling history, listener gating, turn queues, and anti-loop controls.
-- **Voice-first:** the player can use push-to-talk or always-on transcription with barge-in handling, adaptive noise thresholds, transcript filtering, and subtitle support.
-- **Built for scenes, not chat boxes:** convention bots roam, face nearby speakers, animate while talking, and keep booth conversations alive around the player.
-- **Engine-native integration:** the core runtime is exposed through Unreal components and subsystems, so behavior can be wired from C++ or Blueprints.
+![LocalTalker Windows character studio](docs/assets/windows-studio.png)
 
-## System at a glance
+We're also incorporating LocalTalker into a game of our own. This repository shares the foundational conversation system; that game is not part of this release.
 
-![System at a glance](docs/readme/system-at-a-glance.svg)
+## What it provides
 
-## Live conversation flow
+- Local inference through **llama.cpp**, **Ollama**, or an **OpenAI-compatible endpoint** such as a local model server.
+- Push-to-talk speech recognition with **faster-whisper**, and voice synthesis with **Kokoro ONNX**.
+- Character personalities, voices, persistent conversation history, and host-supplied context.
+- Structured replies for game logic, separate from spoken dialogue.
+- Shared scenes, multiple speakers, participation rules, interruption, and playback-aware turn scheduling.
+- A REST/WebSocket API, JSON schemas, a Windows desktop client, and a reusable UE5 plugin.
 
-![Live conversation flow](docs/readme/live-conversation-flow.svg)
+Conversation history is persistence, not an autonomous game-memory system: the host supplies authoritative facts and decides which state changes to retain.
 
-## Core architecture
+## Engine support
 
-![Core architecture](docs/readme/core-architecture.svg)
-
-## Main pieces
-
-| Area | Responsibility |
+| Host | Included today |
 | --- | --- |
-| `UAutoChatVoiceInputComponent` | Player-side mic UX, always-on speech segmentation, barge-in, routing, transcript quality guards |
-| `ULocalPlayerInteractionComponent` | Whisper capture/transcription bridge and nearest-AI interaction helper |
-| `ULocalTalkConversationSubsystem` | World-level director for proximity groups, turn queues, listener gating, NPC auto-replies, and keep-alive chatter |
-| `ULocalCharacterComponent` | Per-NPC persona, prompt assembly, llama.cpp generation, streaming sentence chunking, TTS playback, subtitles |
-| `UConventionBotSubsystem` | Demo-world behavior: roaming, facing targets, booth-ready visuals, and talk-state animation |
+| Windows desktop | Standalone Electron demo with a Python runtime; source and packaging scripts |
+| Unreal Engine 5 | Reusable C++/Blueprint plugin developed against UE 5.8; capture and positional voice playback |
+| Unity | Documented C# integration path using the same HTTP/WebSocket contract; **no packaged Unity adapter yet** |
+| Godot, custom engines, other clients | The same engine-independent API; adapters are host-owned |
 
-## Notable engineering details
-
-- **Player-first turn handling:** user prompts upgrade queued NPC turns and temporarily suppress nearby NPC chatter so the player is not talked over.
-- **Ambient scene scaling:** NPC concurrency caps, listener requirements, random post-turn pauses, and context cleanup keep booth chatter believable and bounded.
-- **Loop resistance:** the director detects repetitive NPC exchanges, while the voice input path rejects echo-like and low-diversity transcripts.
-- **Streaming speech path:** generated text is chunked into speakable units so responses can begin before the full completion is finished.
-- **Reusable plugin boundary:** local inference, STT/TTS, and turn management live in `Plugins/LocalTalker`, while project-specific demo behavior stays in `Source/AutoChat`.
-
-## Repository layout
-
-```text
-AutoChat/
-|-- Source/AutoChat/                 # Game-side systems and tests
-|-- Plugins/LocalTalker/             # Reusable local conversation plugin
-|-- Config/                          # Project and LocalTalker defaults
-|-- Tools/                           # Benchmarks, packaging helpers, level population scripts
-`-- docs/readme/                      # README visual assets
-```
-
-## Demo scene
-
-The included convention scene is populated with themed booths and talkative exhibitors. `Tools/populate_convention_level.py` assembles the expo floor, configures booth NPC personas, assigns voices, and gives selected characters patrol paths so the environment feels active even before the player speaks.
+This is an early framework release. Engine-version compatibility, deployment requirements, and model behavior need validation for your game.
 
 ## Quick start
 
-1. Open `AutoChat.uproject` in Unreal Engine 5.7.
-2. Ensure the `LocalTalker` plugin is enabled.
-3. Install the Python dependencies required by the bundled worker processes:
+### Windows demo
+
+Download the Windows ZIP from [Releases](https://github.com/BigOtis/LocalTalker/releases), extract the **entire folder**, and run `LocalTalker.exe`. The portable build includes the desktop app and Python runtime. Model weights and inference servers are configured separately; they are not included in the download.
+
+In **Inspect → setup**, choose a reachable local provider and model. Configure a voice, select a character, then type or hold **Mic / Space** to speak. **Escape / Interrupt** stops the current response. **New group chat** demonstrates multiple characters taking turns.
+
+Speech assets download on first use. Once the selected local models and speech assets are installed, conversations can run locally without a cloud account. Choosing a remote API endpoint sends requests to that endpoint. Hardware requirements depend on the models you select; no particular GPU is required by the protocol.
+
+### From source
+
+Requires **Windows, Python 3.11, and Node.js 22.12+**.
 
 ```powershell
-pip install -r Plugins/LocalTalker/Resources/Whisper/requirements-whisper-stt.txt
-pip install -r Plugins/LocalTalker/Resources/Kokoro/requirements-kokoro-tts.txt
+git clone https://github.com/BigOtis/LocalTalker.git
+cd LocalTalker
+.\scripts\setup.ps1
+.\scripts\start.ps1
 ```
 
-4. Verify your local model/runtime paths in `Project Settings -> LocalTalker`.
-5. Launch the level and speak near one of the convention bots.
+After setup, `LocalTalker.cmd` starts the desktop studio. Settings and SQLite history live in `%LOCALAPPDATA%\LocalTalker`; `LOCALTALKER_HOME` overrides this directory.
 
-## Tests
-
-The project includes automation coverage for:
-
-- proximity-based conversation grouping
-- player-to-NPC routing
-- user-turn prioritization
-- transcript spam / echo rejection
-- always-on voice segmentation behavior
-
-Example command:
+To run just the service:
 
 ```powershell
-& "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" `
-  "C:\Path\To\AutoChat.uproject" `
-  -NullRHI -Unattended -NoSplash -NoPause -NoSound `
-  -ExecCmds="Automation RunTests Plugins.LocalTalker.Dialog.E2E; Automation RunTests Project.AutoChat.VoiceInput; Quit"
+.\.venv\Scripts\python.exe -m localtalker serve --host 127.0.0.1 --port 8765
 ```
 
-## Tech stack
+Browse `http://127.0.0.1:8765/docs` for the API, or `/openapi.json` for its schema. The simulated provider is available explicitly for testing; unavailable real providers are not silently replaced with simulated replies.
 
-| Layer | Technology |
-| --- | --- |
-| Engine | Unreal Engine 5.7 |
-| Runtime language | C++ |
-| Local LLM | `llama.cpp` with GGUF models |
-| Speech-to-text | Whisper / `faster-whisper` worker |
-| Text-to-speech | Kokoro ONNX worker |
-| Tooling | Python, PowerShell, Unreal automation tests |
+## The integration pattern
 
-## More documentation
+```mermaid
+flowchart LR
+    Game[Game / Windows studio] -->|Text, microphone PCM, world context| Runtime[LocalTalker runtime]
+    Runtime <--> LLM[Local language model]
+    Runtime <--> Speech[Whisper + Kokoro]
+    Runtime <--> History[Character and conversation storage]
+    Runtime -->|Dialogue, voice, structured proposals| Game
+```
 
-- [`Plugins/LocalTalker/README.md`](Plugins/LocalTalker/README.md)
-- [`Plugins/LocalTalker/README_INSTALL_INPROC.md`](Plugins/LocalTalker/README_INSTALL_INPROC.md)
+1. Start or connect to the local runtime and create characters or a scene.
+2. Send only the relevant world context and stable object identifiers.
+3. Submit text or PCM16 audio through the WebSocket connection.
+4. Play voice, display subtitles, and validate proposed actions against your game's allowed actions and current state.
+5. For scenes, acknowledge `playback_done` **after queued audio finishes**, not when generation ends. Cancel stale playback when a turn is interrupted.
+
+For example, a reply can propose a gesture and interaction:
+
+```json
+{
+  "dialogue": "I'll check the terminal.",
+  "emotion": "curious",
+  "actions": [{ "name": "inspect", "target": "terminal_01", "parameters": {} }],
+  "animation": "point"
+}
+```
+
+The runtime does not navigate actors or execute these proposals. The host validates them, performs supported actions, and reports the actual result in subsequent context. See [the integration guide](docs/integration.md), [scene scheduling](docs/scenes.md), and [protocol schemas](protocol).
+
+## Develop and package
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+cd app
+npm run build
+npx playwright install chromium
+npm run test:e2e
+cd ..
+.\.venv\Scripts\python.exe -m pip install -e '.[packaging]'
+.\scripts\package.ps1
+```
+
+The packaging script writes a portable folder under `app/release/`. Keep its files together. Windows builds are unsigned. Models and third-party components have their own licenses; the framework source is [MIT licensed](LICENSE).
+
+See [architecture](docs/architecture.md), [speech](docs/speech.md), and [testing](docs/testing.md). Issues and focused pull requests are welcome; include runtime logs, provider details, and reproduction steps, with personal conversations and credentials removed.

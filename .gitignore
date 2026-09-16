@@ -1,66 +1,42 @@
-# Unreal Engine .gitignore
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
 
-# Visual Studio / Rider
-.vscode/
-.vs/
-.idea/
-*.suo
-*.user
-*.sln.docstates
-*.rsuser
+node_modules/
+app/dist/
+app/release/
+*.log
 
-# Build artifacts
-Binaries/
-Intermediate/
-Build/
-DerivedDataCache/
+.localtalker/
+data/
+*.gguf
+*.onnx
+*.bin
+!protocol/**
 
-# Saved data (logs, autosaves, local configs)
-Saved/
-
-# Plugin binaries and intermediates
-Plugins/*/Binaries/
-Plugins/*/Intermediate/
-StarterContent/
-Content/
-Packaged/
-
-# Third-party binaries (large files, downloaded separately)
-Plugins/*/ThirdParty/
-
-# Unreal generated files
-*.VC.db
-*.VC.db-shm
-*.VC.db-wal
-*.VC.opendb
-*.opensdf
-*.sdf
-
-# Compiled shader caches
-*.shaderbin
-
-# Asset hot-reload backups
-*_BuiltData.uasset
-
-# Crash reports
-CrashReportClient.ini
-
-# macOS
+.env
+.env.local
 .DS_Store
-*.dSYM/
-
-# Windows
 Thumbs.db
-Desktop.ini
+.idea/
+.vscode/
+*.swp
+app/test-results/
+app/playwright-report/
 
-# Workspace files (user-specific)
-*.code-workspace
-
-# Ignore downloaded models/voices (large binary files)
-Plugins/LocalTalker/Resources/Models/*.gguf
-Plugins/LocalTalker/Resources/Voices/*.onnx
-Plugins/LocalTalker/Resources/Voices/*.onnx.json
-
-# Ignore local llama.cpp checkout (submodule or external source)
-ThirdPartySrc/llama.cpp/
-ThirdPartySrc/llama.cpp
+# User-provided microphone recordings stay local.
+Recording*.m4a
+# Unreal generated files (maps, materials, source and configuration stay tracked)
+integrations/unreal/**/Binaries/
+integrations/unreal/**/Intermediate/
+integrations/unreal/**/Saved/
+integrations/unreal/**/DerivedDataCache/
+integrations/unreal/Packaged/
