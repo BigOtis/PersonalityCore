@@ -1,4 +1,6 @@
 #include "LocalTalkerCharacterComponent.h"
+#include "Engine/World.h"
+#include "Engine/GameInstance.h"
 #include "LocalTalkerSubsystem.h"
 #include "Components/AudioComponent.h"
 #include "Sound/SoundWaveProcedural.h"

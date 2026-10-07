@@ -3,7 +3,7 @@
 #include "Engine/DeveloperSettings.h"
 #include "LocalTalkerSettings.generated.h"
 
-UCLASS(Config=Game, DefaultConfig, meta=(DisplayName="LocalTalker"))
+UCLASS(Config=Game, DefaultConfig, meta=(DisplayName="PersonalityCore"))
 class LOCALTALKER_API ULocalTalkerSettings : public UDeveloperSettings {
  GENERATED_BODY()
 public:

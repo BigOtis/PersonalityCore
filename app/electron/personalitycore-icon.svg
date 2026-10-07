@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="PersonalityCore">
+<rect x="4" y="4" width="248" height="248" rx="52" fill="#12110f"/>
+<path d="M64 52h128a24 24 0 0 1 24 24v94a24 24 0 0 1-24 24h-70l-40 32v-32H64a24 24 0 0 1-24-24V76a24 24 0 0 1 24-24" fill="#e3a85d"/>
+<path d="M76 115v20m26-36v52m26-70v88m26-70v52m26-36v20" stroke="#12110f" stroke-width="9" stroke-linecap="round"/>
+</svg>

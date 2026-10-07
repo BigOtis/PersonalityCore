@@ -15,4 +15,4 @@ try {
     if ($LASTEXITCODE) { throw 'Frontend build failed.' }
 } finally { Pop-Location }
 if (!$SkipTests) { & '.\.venv\Scripts\python.exe' -m pytest -q; if ($LASTEXITCODE) { throw 'Tests failed.' } }
-Write-Host 'Ready. Double-click LocalTalker.cmd to launch the studio.'
+Write-Host 'Ready. Double-click PersonalityCore.cmd to launch the studio.'

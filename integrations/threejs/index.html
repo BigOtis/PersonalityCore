@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PersonalityCore · Three.js</title>
+  <style>
+    * { box-sizing: border-box; } body { margin: 0; font: 16px system-ui; color: #e4f2ef; background: #122421; }
+    main { max-width: 1040px; margin: 32px auto; padding: 0 24px; } h1 { font-size: 28px; }
+    #viewport { height: 340px; border-radius: 12px; overflow: hidden; } canvas { display: block; }
+    form, .controls { display: flex; gap: 12px; margin: 16px 0; flex-wrap: wrap; }
+    input, select, button { font: inherit; padding: 10px 14px; border: 1px solid #52746a; border-radius: 6px; }
+    input { flex: 1; min-width: 200px; } button { background: #c5e5b2; cursor: pointer; } button:disabled { opacity: .45; cursor: default; }
+    #dialogue { min-height: 3em; font-size: 20px; } pre { white-space: pre-wrap; color: #a7c7bd; }
+  </style>
+</head>
+<body><main>
+  <h1>PersonalityCore in Three.js</h1>
+  <p>Your authored character and voice, with a small browser scene. Start the PersonalityCore runtime, then connect.</p>
+  <div id="viewport" aria-label="Three.js character scene"></div>
+  <div class="controls"><label>Character <select id="character" aria-label="Character"></select></label><button id="connect">Connect</button><button id="interrupt" disabled>Interrupt</button><span id="status" role="status">Loading characters…</span></div>
+  <form id="message"><input id="words" aria-label="Message" placeholder="Say something to your character" maxlength="2000" required><button id="send" disabled>Send</button></form>
+  <p id="dialogue" aria-live="polite"></p>
+  <details><summary>Proposed actions</summary><pre id="proposals">[]</pre></details>
+  <p>The browser displays proposals. Add your own validated gameplay actions when integrating a game.</p>
+</main><script type="module" src="/main.js"></script></body>
+</html>

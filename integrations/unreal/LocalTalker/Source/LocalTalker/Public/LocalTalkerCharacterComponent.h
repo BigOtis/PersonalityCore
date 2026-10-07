@@ -11,10 +11,10 @@ class LOCALTALKER_API ULocalTalkerCharacterComponent : public UActorComponent {
  GENERATED_BODY()
 public:
  ULocalTalkerCharacterComponent();
- UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker") FString CharacterKey;
- UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="LocalTalker") bool bSpatializeVoice=true;
- UPROPERTY(BlueprintReadOnly, Category="LocalTalker") bool bSpeaking=false;
- UFUNCTION(BlueprintCallable, Category="LocalTalker") void StopVoice();
+ UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="PersonalityCore") FString CharacterKey;
+ UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="PersonalityCore") bool bSpatializeVoice=true;
+ UPROPERTY(BlueprintReadOnly, Category="PersonalityCore") bool bSpeaking=false;
+ UFUNCTION(BlueprintCallable, Category="PersonalityCore") void StopVoice();
  void QueueVoice(const TArray<uint8>& PCM, int32 SampleRate);
  virtual void BeginPlay() override;
  virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;

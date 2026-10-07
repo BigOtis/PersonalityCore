@@ -14,10 +14,10 @@ from localtalker.paths import db_path, user_data_dir
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(prog="localtalker", description="LocalTalker runtime and developer console.")
+    parser = argparse.ArgumentParser(prog="localtalker", description="PersonalityCore character interaction runtime (formerly LocalTalker).")
     sub = parser.add_subparsers(dest="command")
 
-    serve = sub.add_parser("serve", help="Start the LocalTalker HTTP/WebSocket runtime")
+    serve = sub.add_parser("serve", help="Start the PersonalityCore HTTP/WebSocket runtime")
     serve.add_argument("--host", default=None)
     serve.add_argument("--port", type=int, default=None)
     serve.add_argument("--reload", action="store_true")
@@ -65,7 +65,7 @@ def _serve(args: argparse.Namespace) -> None:
     runtime = build_runtime(cfg, db_path())
     app = create_app(runtime, static_dir=static_dir)
 
-    print(f"LocalTalker runtime on http://{host}:{port}")
+    print(f"PersonalityCore runtime on http://{host}:{port}")
     print(f"Data directory: {user_data_dir()}")
     uvicorn.run(app, host=host, port=port, reload=getattr(args, "reload", False), log_level="info")
 
@@ -118,7 +118,7 @@ def _models(args: argparse.Namespace) -> None:
     print(f"Ready: {dest}")
     if cfg.llama_server_path:
         print(f"llama-server: {cfg.llama_server_path}")
-    print("Restart LocalTalker or send a message to load Muse Glimmer on the GPU.")
+    print("Restart PersonalityCore or send a message to load Muse Glimmer on the GPU.")
 
 
 def _info() -> None:

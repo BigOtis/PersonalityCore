@@ -11,4 +11,4 @@ if (!(Test-Path 'app\dist\index.html')) {
 $nodeCommand = if (Test-Path 'app\node_modules\node\bin\node.exe') { (Resolve-Path 'app\node_modules\node\bin\node.exe').Path } else { 'node' }
 Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
 Push-Location app
-try { & $nodeCommand 'node_modules\electron\cli.js' '.'; if ($LASTEXITCODE) { throw 'LocalTalker exited unexpectedly.' } } finally { Pop-Location }
+try { & $nodeCommand 'node_modules\electron\cli.js' '.'; if ($LASTEXITCODE) { throw 'PersonalityCore exited unexpectedly.' } } finally { Pop-Location }

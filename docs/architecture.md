@@ -1,13 +1,13 @@
 # Architecture
 
-LocalTalker is a local conversational runtime with a standalone studio on top.
+PersonalityCore is a character interaction runtime for human-authored games, with a standalone studio on top. Authors supply the script, character and canonical facts; dynamic replies and validated player requests extend that authored experience. See [the authored-character workflow](authored-characters.md).
 
 ```
 Microphone / text
         │
         ▼
 ┌───────────────────┐     REST + WebSocket      ┌────────────────────┐
-│ Developer studio  │ ─────────────────────────▶│ LocalTalker runtime│
+│ Developer studio  │ ─────────────────────────▶│ PersonalityCore│
 │ (Electron / web)  │                           │ FastAPI + asyncio  │
 └───────────────────┘                           └─────────┬──────────┘
                                                           │

@@ -6,6 +6,10 @@ const http = require("http");
 const PORT = process.env.LOCALTALKER_PORT || "8765";
 const BASE = `http://127.0.0.1:${PORT}`;
 const root = path.resolve(__dirname, "..", "..");
+const legacyUserData = app.getPath("userData");
+app.setName("PersonalityCore");
+app.setPath("userData", legacyUserData);
+if (process.platform === "win32") app.setAppUserModelId("com.robotfuture.personalitycore");
 let runtime = null;
 let quitting = false;
 let startupError = "";
@@ -39,12 +43,12 @@ function startRuntime() {
   runtime.on("error", error => { startupError = error.message; });
   runtime.on("exit", code => {
     output.end();
-    if (!quitting && code) dialog.showErrorBox("LocalTalker runtime stopped", `${startupError}\n\nRestart LocalTalker to reconnect. Log: ${logPath}`);
+    if (!quitting && code) dialog.showErrorBox("PersonalityCore runtime stopped", `${startupError}\n\nRestart PersonalityCore to reconnect. Log: ${logPath}`);
   });
 }
 async function createWindow() {
   const window = new BrowserWindow({width: 1360, height: 860, minWidth: 700, minHeight: 600,
-    backgroundColor: "#12110f", title: "LocalTalker", show: false,
+    backgroundColor: "#12110f", title: "PersonalityCore", icon: path.join(__dirname, "personalitycore.png"), show: false,
     webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
   window.removeMenu();
@@ -72,7 +76,7 @@ else {
       for (let i = 0; i < 100; i++) { if (await healthy()) {ready = true; break;} await new Promise(r => setTimeout(r, 300)); }
       if (!ready) throw new Error(`Runtime did not start.\n${startupError}\n\nRun scripts/setup.ps1 to install dependencies.`);
       await createWindow();
-    } catch (error) { dialog.showErrorBox("LocalTalker could not start", error.message); app.quit(); }
+    } catch (error) { dialog.showErrorBox("PersonalityCore could not start", error.message); app.quit(); }
   });
 }
 app.on("before-quit", () => {

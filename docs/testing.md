@@ -23,7 +23,7 @@ fails if the running runtime is not configured for real inference.
 `node app/desktop-smoke.cjs` checks a native Electron window. With
 `LOCALTALKER_SMOKE=1`, it additionally runs real text and microphone turns using
 `.localtalker/validation/mic-input.wav`, produced by the hardware speech test.
-Set `SMOKE_EXE` to a packaged `LocalTalker.exe` and `SMOKE_PORT` to an unused port
+Set `SMOKE_EXE` to a packaged `PersonalityCore.exe` and `SMOKE_PORT` to an unused port
 to test bundled startup, speech, and shutdown. The test removes its temporary
 character and closes the application.
 

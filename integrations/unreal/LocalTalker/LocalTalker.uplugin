@@ -2,10 +2,10 @@
   "FileVersion": 3,
   "Version": 1,
   "VersionName": "0.2.0",
-  "FriendlyName": "LocalTalker",
-  "Description": "Engine-neutral local AI scenes, characters, voice and turn taking.",
+  "FriendlyName": "PersonalityCore",
+  "Description": "Character personality, authored scene direction, local voice and player-request integration.",
   "Category": "AI",
-  "CreatedBy": "LocalTalker",
+  "CreatedBy": "PersonalityCore",
   "CanContainContent": true,
   "Modules": [
     {
@@ -19,5 +19,6 @@
       "Name": "AudioCapture",
       "Enabled": true
     }
-  ]
+  ],
+  "DocsURL": "https://github.com/BigOtis/PersonalityCore/tree/main/integrations/unreal"
 }

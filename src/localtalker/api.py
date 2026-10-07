@@ -59,8 +59,8 @@ def create_app(runtime: ConversationRuntime, static_dir: Path | None = None, sta
                 await runtime.shutdown()
 
     app = FastAPI(
-        title="LocalTalker",
-        version="0.1.0",
+        title="PersonalityCore",
+        version="0.2.0",
         lifespan=lifespan,
     )
     app.add_middleware(

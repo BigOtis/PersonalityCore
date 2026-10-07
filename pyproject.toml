@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "localtalker"
-version = "0.1.0"
-description = "Local-first conversational AI runtime for games and interactive experiences."
+version = "0.2.0"
+description = "PersonalityCore: character personality and interaction for human-authored games."
 readme = "README.md"
 requires-python = ">=3.11"
-authors = [{ name = "LocalTalker" }]
+authors = [{ name = "PersonalityCore contributors" }]
 license = { text = "MIT" }
 dependencies = [
   "fastapi>=0.115",
@@ -39,6 +39,7 @@ dev = [
 ]
 
 [project.scripts]
+personalitycore = "localtalker.cli:main"
 localtalker = "localtalker.cli:main"
 
 [tool.setuptools.packages.find]

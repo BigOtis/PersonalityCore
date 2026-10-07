@@ -1,6 +1,6 @@
 ﻿# Local inference providers
 
-LocalTalker connects to providers rather than requiring one model or inference engine.
+PersonalityCore connects to providers rather than requiring one model or inference engine.
 
 | Provider | Setup |
 | --- | --- |
@@ -13,4 +13,4 @@ Use **Inspect → setup** in the Windows studio. Settings are stored in %LOCALAP
 
 The catalog also offers a Muse Glimmer GGUF installation option. It downloads substantial model assets separately; they are not included in the framework or desktop release. Memory, speed, context limits, and model licenses depend on the selected model and quantization. Adjust GPU offload and context settings for the machine sharing resources with your game.
 
-An unavailable real provider reports an error. LocalTalker does not silently substitute the simulated provider. Speech recognition and voice synthesis use separate assets; see [speech](speech.md).
+An unavailable real provider reports an error. PersonalityCore does not silently substitute the simulated provider. Speech recognition and voice synthesis use separate assets; see [speech](speech.md).

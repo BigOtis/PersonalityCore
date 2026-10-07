@@ -1,16 +1,18 @@
-<p align="center"><img src="docs/assets/localtalker.svg" alt="LocalTalker — Local voices. Living characters." width="880"></p>
+<p align="center"><img src="docs/assets/personalitycore.svg" alt="PersonalityCore — Authored characters. Dynamic interaction." width="880"></p>
 
-<p align="center"><strong>A local conversational AI foundation for games.</strong><br>Characters, language models, speech, memory, and structured gameplay requests through one engine-independent runtime.</p>
+<p align="center"><strong>A character personality and interaction runtime for human-authored games.</strong><br>Your characters, your script, flexible responses and real actions for player requests.</p>
 
-<p align="center"><a href="https://github.com/BigOtis/LocalTalker/releases">Windows demo</a> · <a href="#quick-start">Quick start</a> · <a href="integrations/unreal/README.md">Unreal Engine</a> · <a href="integrations/unity/README.md">Unity integration</a> · <a href="docs/integration.md">Protocol</a></p>
+<p align="center"><a href="https://github.com/BigOtis/PersonalityCore/releases">Windows app</a> · <a href="#quick-start">Quick start</a> · <a href="integrations/unreal/README.md">Unreal Engine</a> · <a href="integrations/threejs/README.md">Three.js</a> · <a href="integrations/unity/README.md">Unity integration</a> · <a href="docs/integration.md">Protocol</a></p>
 
-LocalTalker gives your game a consistent way to talk to local language models. Send player speech or text alongside the world state. Receive a voiced character response plus structured proposals for actions, emotions, animations, and state changes. Your game remains in charge of what actually happens.
+**PersonalityCore**, formerly LocalTalker, gives authored characters flexibility in dynamic situations. Human developers and writers define the character, script, story beats, canonical facts and permitted behavior. The runtime adds grounded responses and structured proposals so characters can act on player requests in the world. The game validates and confirms what actually happens.
+
+It is not intended to replace human game development or generate an entire game’s dialogue. Exact authored lines can use the `speak` path without dialogue inference; dynamic replies handle questions, clarification and requests within the authored experience. [Read the authored-character workflow](docs/authored-characters.md).
 
 The **Windows character studio** is the standalone demo and reference client: create characters, choose local models and voices, hold a key to speak, and try conversations with one character or a group. No game project is needed.
 
-![LocalTalker Windows character studio](docs/assets/windows-studio.png)
+![PersonalityCore Windows character studio](docs/assets/windows-studio.png)
 
-We're also incorporating LocalTalker into a game of our own. This repository shares the foundational conversation system; that game is not part of this release.
+**Cohersion** uses PersonalityCore for COLIN, its physical robot companion: carrying, navigation, puzzle actions, memory, authored dialogue and optional laboratory interactions. [See the illustrated game integration](docs/cohersion.md), with seven Unreal screenshots. Cohersion and its assets are separate from this framework.
 
 ## What it provides
 
@@ -29,6 +31,7 @@ Conversation history is persistence, not an autonomous game-memory system: the h
 | --- | --- |
 | Windows desktop | Standalone Electron demo with a Python runtime; source and packaging scripts |
 | Unreal Engine 5 | Reusable C++/Blueprint plugin developed against UE 5.8; capture and positional voice playback |
+| Three.js | Small browser example with character selection, text, streamed voice and interruption; [guide](integrations/threejs/README.md) |
 | Unity | Documented C# integration path using the same HTTP/WebSocket contract; **no packaged Unity adapter yet** |
 | Godot, custom engines, other clients | The same engine-independent API; adapters are host-owned |
 
@@ -38,7 +41,7 @@ This is an early framework release. Engine-version compatibility, deployment req
 
 ### Windows demo
 
-Download the Windows ZIP from [Releases](https://github.com/BigOtis/LocalTalker/releases), extract the **entire folder**, and run `LocalTalker.exe`. The portable build includes the desktop app and Python runtime. Model weights and inference servers are configured separately; they are not included in the download.
+Download the Windows ZIP from [Releases](https://github.com/BigOtis/PersonalityCore/releases), extract the **entire folder**, and run `PersonalityCore.exe` (v0.2.0 or newer; older releases use `LocalTalker.exe`). The portable build includes the desktop app and Python runtime. Model weights and inference servers are configured separately; they are not included in the download.
 
 In **Inspect → setup**, choose a reachable local provider and model. Configure a voice, select a character, then type or hold **Mic / Space** to speak. **Escape / Interrupt** stops the current response. **New group chat** demonstrates multiple characters taking turns.
 
@@ -49,13 +52,13 @@ Speech assets download on first use. Once the selected local models and speech a
 Requires **Windows, Python 3.11, and Node.js 22.12+**.
 
 ```powershell
-git clone https://github.com/BigOtis/LocalTalker.git
-cd LocalTalker
+git clone https://github.com/BigOtis/PersonalityCore.git
+cd PersonalityCore
 .\scripts\setup.ps1
 .\scripts\start.ps1
 ```
 
-After setup, `LocalTalker.cmd` starts the desktop studio. Settings and SQLite history live in `%LOCALAPPDATA%\LocalTalker`; `LOCALTALKER_HOME` overrides this directory.
+After setup, `PersonalityCore.cmd` starts the desktop studio. Settings and SQLite history live in `%LOCALAPPDATA%\LocalTalker`; `LOCALTALKER_HOME` overrides this directory.
 
 To run just the service:
 
@@ -69,7 +72,7 @@ Browse `http://127.0.0.1:8765/docs` for the API, or `/openapi.json` for its sche
 
 ```mermaid
 flowchart LR
-    Game[Game / Windows studio] -->|Text, microphone PCM, world context| Runtime[LocalTalker runtime]
+    Game[Game / Windows studio] -->|Text, microphone PCM, world context| Runtime[PersonalityCore runtime]
     Runtime <--> LLM[Local language model]
     Runtime <--> Speech[Whisper + Kokoro]
     Runtime <--> History[Character and conversation storage]
@@ -111,3 +114,7 @@ cd ..
 The packaging script writes a portable folder under `app/release/`. Keep its files together. Windows builds are unsigned. Models and third-party components have their own licenses; the framework source is [MIT licensed](LICENSE).
 
 See [architecture](docs/architecture.md), [speech](docs/speech.md), and [testing](docs/testing.md). Issues and focused pull requests are welcome; include runtime logs, provider details, and reproduction steps, with personal conversations and credentials removed.
+
+## Name and compatibility
+
+The product, studio, downloads and Unreal editor display name are **PersonalityCore**. Existing `localtalker` Python imports, `LocalTalker` Unreal module/class IDs, environment variables and user-data paths remain compatible. Both CLI entry points, `personalitycore` and `localtalker`, use the same runtime. `LocalTalker.cmd` remains a launcher alias.

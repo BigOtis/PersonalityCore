@@ -61,7 +61,7 @@ export function App() {
   const [outId, setOutId] = useState("");
   const [listenMode, setListenMode] = useState<"push_to_talk" | "auto">("push_to_talk");
   const [armed, setArmed] = useState(false);
-  const [boot, setBoot] = useState("Connecting to LocalTalker…");
+  const [boot, setBoot] = useState("Connecting to PersonalityCore…");
 
   const socketRef = useRef<WebSocket | null>(null);
   const playback = useRef(new PlaybackQueue());
@@ -536,7 +536,7 @@ export function App() {
     return (
       <div className="empty">
         <div>
-          <h3>LocalTalker</h3>
+          <h3>PersonalityCore</h3>
           <p>{boot}</p><button className="ghost" onClick={() => location.reload()}>Reconnect</button>
         </div>
       </div>
@@ -547,7 +547,7 @@ export function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <h1>LocalTalker</h1>
+          <h1>PersonalityCore</h1>
           <span>Studio</span>
         </div>
         <div className="top-actions">
