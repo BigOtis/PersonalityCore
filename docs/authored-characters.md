@@ -1,6 +1,6 @@
 # Human-authored characters, dynamic interaction
 
-**PersonalityCore** (formerly LocalTalker) gives an authored character flexibility
+**PersonalityCore** gives an authored character flexibility
 when the player asks an unexpected question or requests an action in the world.
 Human developers and writers define the experience: the script, character,
 voice, canon, story beats, puzzle rules and permitted behavior.

@@ -4,15 +4,21 @@
 
 <p align="center"><a href="https://github.com/BigOtis/PersonalityCore/releases">Windows app</a> · <a href="#quick-start">Quick start</a> · <a href="integrations/unreal/README.md">Unreal Engine</a> · <a href="integrations/threejs/README.md">Three.js</a> · <a href="integrations/unity/README.md">Unity integration</a> · <a href="docs/integration.md">Protocol</a></p>
 
-**PersonalityCore**, formerly LocalTalker, gives authored characters flexibility in dynamic situations. Human developers and writers define the character, script, story beats, canonical facts and permitted behavior. The runtime adds grounded responses and structured proposals so characters can act on player requests in the world. The game validates and confirms what actually happens.
+**PersonalityCore** gives authored characters flexibility in dynamic situations. Human developers and writers define the character, script, story beats, canonical facts and permitted behavior. The runtime adds grounded responses and structured proposals so characters can act on player requests in the world. The game validates and confirms what actually happens.
 
 It is not intended to replace human game development or generate an entire game’s dialogue. Exact authored lines can use the `speak` path without dialogue inference; dynamic replies handle questions, clarification and requests within the authored experience. [Read the authored-character workflow](docs/authored-characters.md).
 
 The **Windows character studio** is the standalone demo and reference client: create characters, choose local models and voices, hold a key to speak, and try conversations with one character or a group. No game project is needed.
 
-![PersonalityCore Windows character studio](docs/assets/windows-studio.png)
+![PersonalityCore character authoring](docs/assets/windows-character-authoring-20261009.png)
 
-**Cohersion** uses PersonalityCore for COLIN, its physical robot companion: carrying, navigation, puzzle actions, memory, authored dialogue and optional laboratory interactions. [See the illustrated game integration](docs/cohersion.md), with seven Unreal screenshots. Cohersion and its assets are separate from this framework.
+*Windows studio, October 9: author personality and instructions, then choose a model and voice. Captured from the packaged app with an isolated demo profile.*
+
+**Cohersion** uses PersonalityCore for COLIN, its robot companion. Authored dialogue and story remain developer-owned; dynamic replies and validated actions let COLIN respond to player requests in the world. [See the illustrated game integration](docs/cohersion.md), refreshed with seven October 9 gameplay captures. Cohersion and its assets are separate from this framework.
+
+![COLIN carrying a game object](docs/images/cohersion/colin-carry-20261009.png)
+
+*October 9 action review: the game confirms pickup and records the actual held object. Actions were staged through the host API for photography.*
 
 ## What it provides
 
@@ -41,7 +47,7 @@ This is an early framework release. Engine-version compatibility, deployment req
 
 ### Windows demo
 
-Download the Windows ZIP from [Releases](https://github.com/BigOtis/PersonalityCore/releases), extract the **entire folder**, and run `PersonalityCore.exe` (v0.2.0 or newer; older releases use `LocalTalker.exe`). The portable build includes the desktop app and Python runtime. Model weights and inference servers are configured separately; they are not included in the download.
+Download the Windows ZIP from [Releases](https://github.com/BigOtis/PersonalityCore/releases), extract the **entire folder**, and run `PersonalityCore.exe`. The portable build includes the desktop app and Python runtime. Model weights and inference servers are configured separately; they are not included in the download.
 
 In **Inspect → setup**, choose a reachable local provider and model. Configure a voice, select a character, then type or hold **Mic / Space** to speak. **Escape / Interrupt** stops the current response. **New group chat** demonstrates multiple characters taking turns.
 

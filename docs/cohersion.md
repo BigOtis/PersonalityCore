@@ -1,174 +1,96 @@
 # PersonalityCore in Cohersion
 
-Updated October 7, 2026. Cohersion is an Unreal Engine 5.8 game using PersonalityCore
-for COLIN, a robot companion in an abandoned communication-assessment institute.
-The player gives spoken or typed instructions; COLIN answers in a local voice
-and carries out accepted actions in the actual game world.
+Updated October 9, 2026. **PersonalityCore** gives human-authored characters room
+to answer unexpected questions and act on player requests. Cohersion uses it for
+COLIN, an Unreal Engine 5.8 robot companion. Writers and developers own his
+character, fixed dialogue, world and story. The runtime supplies flexible replies
+and action proposals; the game decides what can happen and confirms the outcome.
 
-PersonalityCore, formerly LocalTalker, remains a separate product. Its studio, character definitions,
-inference providers, speech engines and conversation API work without this game.
-The reusable UE5 plugin and the [Three.js example](../integrations/threejs/README.md)
-are independent entry points. The Institute, its assets, puzzle logic, robot rig
-and save format belong to Cohersion.
+The framework also works independently through its Windows character studio,
+[reusable UE5 plugin](../integrations/unreal/README.md) and
+[Three.js example](../integrations/threejs/README.md). Cohersion's assets, robot
+rig, navigation, physics, progression and saves belong to the game.
 
-Human-authored assessments, readable records, PA announcements and scripted
-story beats define the experience. COLIN's dynamic replies and validated actions
-let the player interact beyond the exact words an author anticipated. Fixed
-dialogue can use recorded audio or the runtime's exact-text `speak` path. See
-[the authored-character workflow](authored-characters.md).
-
-![Reception and COLIN](images/cohersion/reception.png)
-
-*Development gameplay, October 6: the Institute reception and first assessment.
-This capture precedes the final exterior material pass shown below.*
-
-## From words to physical actions
+## From a request to an actual result
 
 ```mermaid
 flowchart TD
-    PLAYER[Typed input or push-to-talk] --> INPUT[Game input queue]
-    INPUT -->|audio| STT[LocalTalker transcription]
-    INPUT -->|text| CONTEXT[Host retrieves relevant targets, actions and facts]
-    STT --> CONTEXT
-    WORLD[Actual world state and confirmed outcomes] --> CONTEXT
-    CONTEXT --> MODEL[Stable character rules + exact instruction + compact host facts]
-    MODEL --> LOCAL[Local model: dialogue and ordered action proposals]
-    LOCAL --> VOICE[Stream dialogue to Kokoro, then PCM16 to the host]
-    VOICE --> PRESENT[Spatial voice, subtitles and local jaw motion]
-    LOCAL --> VALIDATE[Game validates IDs, prerequisites and access]
-    VALIDATE --> EXEC[Navigation, interaction, animation and physics]
-    EXEC --> WORLD
+    PLAYER[Player's exact request] --> HOST[Host retrieves relevant objects, actions and facts]
+    WORLD[Current world state and confirmed outcomes] --> HOST
+    HOST --> CORE[PersonalityCore: character rules, dialogue and action proposals]
+    CORE --> VOICE[Host plays speech and subtitles]
+    CORE --> CHECK[Host validates IDs, prerequisites and access]
+    CHECK --> ACTION[Navigation, interaction, animation and physics]
+    ACTION --> WORLD
 ```
 
-The host ranks abilities for the current words and retrieves their required
-dependencies. It retains object IDs, held items, looked-at references and real
-outcomes. The model never receives the full ability or animation catalog on
-every turn. Relevant memories and canonical institute lore are retrieved when
-needed. An unfamiliar phrase calls for a retrieval improvement or clarification.
+For "put that can on the table", the host resolves the intended can and retains
+the required pickup and placement steps. It checks free hands, reachability and
+the destination. COLIN reaches before taking ownership, acquires the object at
+contact and eases into a carrying pose. The game reports placement only when the
+object is actually on its destination.
 
-Two red cans make "put a red can on the table" ambiguous. Looking at one and
-asking for "that can" supplies a real target. An ordered pickup/place proposal
-becomes navigation, a grip, a carried physics object and a confirmed placement.
-Saying an action happened is not enough to advance an assessment.
+![COLIN holding a red soda can](images/cohersion/colin-carry-20261009.png)
 
-Typed requests remain in submission order. A queued request keeps its original
-looked-at reference and receives fresh state at dispatch. Replies are matched
-to player turn IDs; stale replies and scripted remarks cannot run a different
-instruction's actions. Player turns take priority over the separate PA audio
-queue. **X** cancels the current instruction and queued commands.
+*October 9 action review: COLIN carries the actual game object after the engine's
+pickup step. The HUD records ownership and the confirmed result.*
 
-## A companion with a body and voice
+![Can placed on the assessment table](images/cohersion/colin-placement-20261009.png)
 
-![COLIN waving](images/cohersion/colin-wave.png)
+*October 9 action review: the can is on the destination table. The engine confirms
+placement and releases the authored next step.*
 
-*Development gameplay from the animation pass: an explicit wave plays on
-COLIN's robot skeleton. Later room dressing differs from this capture.*
+Unclear references require clarification. Informational questions do not grant
+permission to operate a device. Cancelled requests stop their action queue;
+cancelling a reach before contact leaves the object alone. Completed results,
+held state and relevant memories supply the next request's context.
 
-COLIN now uses retargeted NPC, office and other animation libraries, with local
-selection for locomotion, gestures, posture and restrained speech reactions.
-The 69-clip Generic NPC library expands his body performance without adding an
-animation list to every model request. Idles and speech reactions are selected
-locally and yield to movement, carrying and explicit player actions.
+The full action and animation registries stay in the host. Each request receives
+only its relevant actions, targets, facts and required prerequisites. Idle motion,
+speech gestures, gripping and locomotion are local presentation systems.
 
-Carrying uses one hand for small props, handles for mugs, an edge grip for flat
-objects and two hands for large or awkward loads. Arm/finger corrections place
-hands at measured contacts. Heavy items slow his movement; placing or dropping
-them restores the requested pace. Knockdowns release held objects and use local
-ragdoll recovery, foley and baked impact vocalizations.
+## The author's character and script remain in charge
 
-LocalTalker streams dialogue segments to Kokoro while the model continues its
-reply, then sends PCM16 chunks to the engine. Cohersion adds robotic coloration
-in its own plugin while preserving the speaker and source speech envelope. Jaw
-motion and subtitles follow actual playback. COLIN can speak during travel.
-These presentation choices can differ in another LocalTalker host.
+Use recorded dialogue or the exact-text `speak` path for lines whose wording
+matters. Dynamic replies cover questions, clarification and reactions within the
+authored experience. This is not a system for generating an entire game's
+dialogue or replacing human development. See the
+[authored-character workflow](authored-characters.md).
 
-## Assessment, trust and optional activities
+The game can combine streamed voice with subtitles, jaw motion and movement.
+COLIN can speak while travelling, carry one- or two-hand loads, sit and operate
+supported objects. Queue entries keep their original requests and target
+references; confirmed world state determines subsequent actions.
 
-| Situation | What happens in the engine |
-| --- | --- |
-| Object identification | Resolve one of two cans and place the intended object on the assessment table |
-| Applied weight | Carry the archive box onto a plate, or ask COLIN to supply the weight; actual load triggers the suspended grand piano |
-| Bowling | COLIN collects, carries and rolls the ball; all six physically tipped pins in one valid delivery release the departure door |
-| Blackout | COLIN retains low-light perception; ask for directions, inspection or operation of the reachable power reset |
-| Coffee and certificate | Fill a carried mug and produce a readable, collectible certificate through actual machine interactions |
-| Furniture and records | Sit, carry movable props, repair a tipped chair, read authored records and search fixed storage |
-| Performance | Gestures, dancing, singing and a playable piano; a short local noclip demonstration returns to its starting place |
+## Current game gallery
 
-![Archive load test](images/cohersion/archive-load-test.png)
+These October 9 screenshots are actual rendered Development-game captures with
+the HUD retained. Camera teleports positioned the review views. Pickup and
+placement were staged through the existing validated action API in an isolated
+profile. Photography used a simulated inference/speech fixture, with no player
+text submitted or generated dialogue presented. These images show physical
+presentation and world state; they are not a new language-model benchmark.
 
-*Development gameplay, October 5: the suspended grand piano above the plate.
-For the box route, release waits until COLIN physically clears the danger area.*
+![Reception and its authored object-placement instruction](images/cohersion/reception-20261009.png)
 
-The piano outcome becomes game memory and affects the farewell. Bowling scores
-real tipped pins, rejects player interference and uses a pinsetter and ball
-return; separate misses cannot accumulate into a strike. Local duet cues and
-device effects use authored playback rather than another model request.
+*Reception: authored instructions and real, identifiable objects.*
 
-![COLIN in darkness](images/cohersion/blackout.png)
+![Archive interaction area](images/cohersion/archive-20261009.png)
 
-*Development gameplay: COLIN's eyes and teeth remain visible during the blackout,
-while voice, typing and player movement remain available.*
+*Archive: the host owns the environment and its physical interactions.*
 
-## The private service laboratory
+![Campus through the archive window](images/cohersion/archive-window-20261009.png)
 
-A deliberate COLIN placement of the archive box, followed by the safe piano
-outcome, earns optional access behind the archive wall. COLIN walks to its
-release and uses the normal touch action; the panel physically slides open.
-Player input stays available, and an explicit wait order defers the demonstration.
-An interrupted reveal retains earned access for a later request.
+*Archive window: the current campus view and room presentation.*
 
-![Service laboratory](images/cohersion/service-laboratory.png)
+![Operations room](images/cohersion/operations-20261009.png)
 
-*Development gameplay, October 6: the optional service laboratory, with the
-retention rig, sealed chamber and optical equipment.*
+*Operations: authored devices, furniture and records remain game content.*
 
-The optical scanner, retention rig and sealed specimen chamber each have a
-local diagnostic cycle that COLIN operates himself. They check power, free
-hands and posture, and report completion only when the cycle finishes. Power
-loss records an interruption. These are fictional gameplay diagnostics, not
-real robot calibration or a memory-integrity service supplied by LocalTalker.
+![Institute courtyard](images/cohersion/courtyard-20261009.png)
 
-## A facility that keeps running
+*Courtyard: another location in the same host-owned world.*
 
-![Awake archive gallery](images/cohersion/archive-gallery.png)
-
-*Actual game-camera capture, October 6: the archive observation gallery after
-its staged lighting and tape-hardware wake-up.*
-
-Tape transports have spinning reels, media drawers, power state and a drawer
-interlock. Looking into the observation gallery wakes staged lighting,
-indicators and spatial machinery sound without taking control away from the
-player. These systems respond to blackout and save/load locally and add no
-extra model turns.
-
-The recent art passes add manufactured architectural modules, physical-scale
-materials, COH's interlocking-loop identity, consistent typography, desk records,
-daylight windows and exterior hills. The scenery stays behind sealed glazing
-and is excluded from collision/navigation.
-
-![Institute exterior through reception glazing](images/cohersion/exterior.png)
-
-*Unreal Editor capture, October 6, from the final exterior review: layered
-DeadHills scenery and the fixed daytime sky beyond the reception windows.*
-
-## Save restoration and validation
-
-Cohersion saves positions, held objects, posture and standing orders, relevant
-memories, recent conversation, prop/device states and puzzle/reward outcomes.
-Loading clears live dialogue/action queues and rebuilds host context from the
-restored world. It does not serialize the model process or replay old commands.
-Manual slots, quicksave, backup recovery and the existing room-entry autosaves
-remain game systems.
-
-Recorded Development checks cover the physical route, carrying, speech
-processing, animation priorities, bowling, blackout, tape interlocks, archive
-reveal and save restoration. The October 6 work includes 29 secret-laboratory
-checks, a 47-check room route and 24 archive-reveal checks. A real local-model
-scanner request selected and completed the diagnostic through normal gameplay.
-These are functional observations, not a claim that every clip or utterance
-has been exhaustively tested.
-
-The screenshots are actual Unreal captures from the named passes. The latest
-Institute changes have not been repackaged into the original standalone
-framework preview. LocalTalker hosts remain independently usable; the game is
-a concrete example of what one host builds on the shared conversation contract.
+These game updates are separate from the standalone framework release. Another
+host can use the same conversation contract with its own characters, script,
+visuals and interaction rules.
